@@ -38,6 +38,20 @@ Next focus: continue expanding the category taxonomy and begin exploring what di
 - Each category should eventually have a dedicated solver module.
 - Start simple; grow complexity only when simpler approaches fail.
 
+## Environment setup
+
+```bash
+# Create the environment (first time)
+conda env create -f environment.yml
+
+# Activate before working
+conda activate arc-agi
+```
+
+In VS Code: `Cmd+Shift+P` → `Python: Select Interpreter` → choose `arc-agi`.
+
+The codebase uses `str | Path` and other Python 3.10+ syntax — always use the `arc-agi` environment, not the system Python.
+
 ## Commands
 
 ```bash

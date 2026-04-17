@@ -1,0 +1,14 @@
+name: arc-agi
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - numpy
+    - pandas
+    - matplotlib
+    - jupyter
+    - jupyterlab
+    - scikit-learn
+    - pytest

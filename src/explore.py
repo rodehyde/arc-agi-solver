@@ -12,7 +12,7 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
-from src.loader import load_all_tasks
+from src.loader import load_all_tasks, load_all_re_arc_tasks
 from src.categories import categorise_task, CATEGORIES
 
 
@@ -21,7 +21,10 @@ RESULTS_DIR = Path(__file__).parent.parent / "results"
 
 def main(split: str = "training") -> None:
     print(f"\nLoading '{split}' tasks...")
-    tasks = load_all_tasks(split)
+    if split == "re_arc":
+        tasks = load_all_re_arc_tasks()
+    else:
+        tasks = load_all_tasks(split)
     total = len(tasks)
     print(f"Total tasks loaded: {total}\n")
 
@@ -58,6 +61,6 @@ def main(split: str = "training") -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Categorise ARC tasks by grid features.")
-    parser.add_argument("--split", default="training", choices=["training", "evaluation"])
+    parser.add_argument("--split", default="training", choices=["training", "evaluation", "re_arc"])
     args = parser.parse_args()
     main(args.split)

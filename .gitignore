@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Conda
+.conda/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Results (generated, not source)
+results/
+
+# ARC data (download separately via instructions in README)
+data/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+post-log.json
+pre-log.json
+
+# VS Code
+.vscode/

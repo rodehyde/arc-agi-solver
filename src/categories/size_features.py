@@ -14,7 +14,7 @@ Categories (a task may belong to multiple):
 from src.loader import grid_dims, count_nonzero, grid_area
 
 
-CATEGORIES = [
+SIZE_CATEGORIES = [
     "SAME_SIZE",
     "SAME_COLOUR_COUNT",
     "FIXED_OUTPUT",
@@ -25,7 +25,7 @@ CATEGORIES = [
 ]
 
 
-def categorise_task(task: dict) -> list[str]:
+def categorise_size(task: dict) -> list[str]:
     """
     Return a list of category labels that apply to this task,
     based on its training examples only.

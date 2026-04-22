@@ -209,7 +209,7 @@ def compute_metrics(logits: torch.Tensor, features: torch.Tensor,
     flat_targets = shift_targets.reshape(-1)
     flat_mask    = shift_mask.reshape(-1)
 
-    loss = F.cross_entropy(flat_logits[flat_mask], flat_targets[flat_mask])
+    loss = F.cross_entropy(flat_logits[flat_mask], flat_targets[flat_mask].long())
 
     preds = flat_logits.argmax(dim=-1)
     cell_acc = (preds[flat_mask] == flat_targets[flat_mask]).float().mean().item()

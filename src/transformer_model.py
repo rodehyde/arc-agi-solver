@@ -210,7 +210,8 @@ class ArcTransformer(nn.Module):
         row_ids  = x[:, :, 2]   # (B, T)
         chg_ids  = x[:, :, 3]   # (B, T) — 0 or 1
         seg_ids  = x[:, :, 4]   # (B, T)
-        seq_pos  = torch.arange(T, device=x.device).unsqueeze(0)  # (1, T)
+        max_pos  = self.seq_pos_emb.num_embeddings - 1
+        seq_pos  = torch.arange(T, device=x.device).clamp(0, max_pos).unsqueeze(0)  # (1, T)
 
         # Clamp ids to valid ranges (safety for any out-of-range tokens)
         row_ids = row_ids.clamp(0, self.row_sin.shape[0] - 1)

@@ -14,7 +14,10 @@ build/
 .ipynb_checkpoints/
 
 # Results (generated, not source)
-results/
+results/*.json
+results/*.png
+results/cluster_4_split/
+results/cluster_plots/
 
 # ARC data (download separately via instructions in README)
 data/

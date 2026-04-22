@@ -367,7 +367,7 @@ def main():
             batch = sample_batch(tokenizer, task_data, task_idx, "train",
                                  args.k_context, rng, args.max_tokens)
 
-            features  = batch["features"].to(device)    # (B, T, 5)
+            features  = batch["features"].to(device).long()    # (B, T, 5) int16→int64
             pad_mask  = batch["pad_mask"].to(device)
             loss_mask = batch["loss_mask"].to(device)
 
@@ -409,7 +409,7 @@ def main():
                 for vi in [[i] for i in range(T)]:
                     batch = sample_batch(tokenizer, task_data, vi, "val",
                                          args.k_context, rng, args.max_tokens)
-                    features  = batch["features"].to(device)
+                    features  = batch["features"].to(device).long()    # int16→int64
                     pad_mask  = batch["pad_mask"].to(device)
                     loss_mask = batch["loss_mask"].to(device)
 

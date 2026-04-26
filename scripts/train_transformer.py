@@ -38,17 +38,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.arc_tokenizer import ArcTokenizer, VOCAB_SIZE, PAD
 from src.transformer_model import ArcTransformer
 
-PROJECT_ROOT = Path(__file__).parent.parent
-RE_ARC_DIR   = PROJECT_ROOT / "data" / "re_arc"
-CLUSTER_FILE = PROJECT_ROOT / "results" / "cluster_inspection.txt"
-CKPT_DIR     = PROJECT_ROOT / "checkpoints"
+PROJECT_ROOT   = Path(__file__).parent.parent
+RE_ARC_DIR     = PROJECT_ROOT / "data" / "re_arc"
+CLUSTER_FILE   = PROJECT_ROOT / "results" / "cluster_inspection.txt"
+CATEGORIES_FILE = PROJECT_ROOT / "results" / "categories_training.json"
+CKPT_DIR       = PROJECT_ROOT / "checkpoints"
 
 N_TRAIN = 800
 N_VAL   = 200
 
 
 # ---------------------------------------------------------------------------
-# Data loading (same as train_poc.py)
+# Data loading
 # ---------------------------------------------------------------------------
 
 def get_cluster_task_ids(cluster: int) -> list[str]:
@@ -59,6 +60,22 @@ def get_cluster_task_ids(cluster: int) -> list[str]:
     if not match:
         raise ValueError(f"Cluster {cluster} not found")
     return re.findall(r"^\s{2}([0-9a-f]{8}):", match.group(1), re.MULTILINE)
+
+
+def get_category_task_ids(category: str) -> list[str]:
+    """Load task IDs for a named category from results/categories_training.json."""
+    if not CATEGORIES_FILE.exists():
+        raise FileNotFoundError(
+            f"Category file not found: {CATEGORIES_FILE}\n"
+            "Run:  python -m src.explore  to generate it."
+        )
+    data = json.load(open(CATEGORIES_FILE))
+    task_ids = [tid for tid, cats in data.items() if category in cats]
+    if not task_ids:
+        raise ValueError(
+            f"Category '{category}' not found or has no tasks in {CATEGORIES_FILE}"
+        )
+    return task_ids
 
 
 def load_task_examples(task_id: str) -> dict:
@@ -234,8 +251,11 @@ def compute_metrics(logits: torch.Tensor, features: torch.Tensor,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--clusters", nargs="+", type=int, default=[18],
-                        help="Cluster IDs to train on")
+    parser.add_argument("--clusters", nargs="+", type=int, default=None,
+                        help="Cluster IDs to train on (from old clustering results)")
+    parser.add_argument("--category", default=None,
+                        help="Category name to train on (from results/categories_training.json); "
+                             "e.g. STRUCTURE_UNCHANGED.  Takes precedence over --clusters.")
     parser.add_argument("--epochs",          type=int,   default=200)
     parser.add_argument("--steps-per-epoch", type=int,   default=200)
     parser.add_argument("--max-tokens",      type=int,   default=4000,
@@ -279,10 +299,19 @@ def main():
     # ------------------------------------------------------------------
     # Load data
     # ------------------------------------------------------------------
-    print(f"Loading tasks for clusters {args.clusters}...")
-    task_ids = []
-    for c in args.clusters:
-        task_ids.extend(get_cluster_task_ids(c))
+    if args.category:
+        print(f"Loading tasks for category '{args.category}'...")
+        task_ids = get_category_task_ids(args.category)
+        run_tag = args.category
+    elif args.clusters:
+        print(f"Loading tasks for clusters {args.clusters}...")
+        task_ids = []
+        for c in args.clusters:
+            task_ids.extend(get_cluster_task_ids(c))
+        run_tag = "_".join(str(c) for c in args.clusters)
+    else:
+        raise ValueError("Specify --category or --clusters")
+
     T = len(task_ids)
     print(f"  {T} tasks")
 
@@ -350,7 +379,6 @@ def main():
     CKPT_DIR.mkdir(exist_ok=True)
     rng = np.random.default_rng(42)
     steps = args.steps_per_epoch
-    cluster_tag = "_".join(str(c) for c in args.clusters)
 
     print(f"\nTraining: {args.epochs} epochs × {steps} steps = {args.epochs*steps:,} total steps")
     print(f"max_tokens={args.max_tokens}, k={args.k_context}, lr={args.lr}, d_model={args.d_model}, layers={args.n_layers}\n")
@@ -425,7 +453,7 @@ def main():
             if improved:
                 best_val_loss = mean_v_loss
                 no_improve = 0
-                p_best = CKPT_DIR / f"transformer_c{cluster_tag}_best.pt"
+                p_best = CKPT_DIR / f"transformer_c{run_tag}_best.pt"
                 torch.save({
                     "epoch": epoch,
                     "model": model.state_dict(),
@@ -454,7 +482,7 @@ def main():
                 break
 
         if (epoch + 1) % args.save_every == 0:
-            p = CKPT_DIR / f"transformer_c{cluster_tag}_epoch_{epoch+1:04d}.pt"
+            p = CKPT_DIR / f"transformer_c{run_tag}_epoch_{epoch+1:04d}.pt"
             torch.save({
                 "epoch": epoch,
                 "model": model.state_dict(),
@@ -467,7 +495,7 @@ def main():
             }, p)
             print(f"  Checkpoint: {p}")
 
-    p = CKPT_DIR / f"transformer_c{cluster_tag}_final.pt"
+    p = CKPT_DIR / f"transformer_c{run_tag}_final.pt"
     torch.save({
         "epoch": epoch,
         "model": model.state_dict(),

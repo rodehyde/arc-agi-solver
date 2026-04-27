@@ -445,6 +445,12 @@ def main():
     parser.add_argument("--category", default=None,
                         help="Category name to train on (from results/categories_training.json); "
                              "e.g. STRUCTURE_UNCHANGED.  Takes precedence over --clusters.")
+    parser.add_argument("--task-ids", nargs="+", default=None,
+                        help="Explicit list of task IDs to train on (e.g. from scene-description "
+                             "clusters).  Takes precedence over --category and --clusters.")
+    parser.add_argument("--run-name", default=None,
+                        help="Override the run tag used for checkpoint filenames. "
+                             "Defaults to the category name or cluster IDs.")
     parser.add_argument("--epochs",          type=int,   default=200)
     parser.add_argument("--steps-per-epoch", type=int,   default=200)
     parser.add_argument("--max-tokens",      type=int,   default=4000,
@@ -488,7 +494,11 @@ def main():
     # ------------------------------------------------------------------
     # Load data
     # ------------------------------------------------------------------
-    if args.category:
+    if args.task_ids:
+        print(f"Loading {len(args.task_ids)} explicit task IDs...")
+        task_ids = args.task_ids
+        run_tag = "custom_" + "_".join(task_ids[:3]) + (f"_plus{len(task_ids)-3}" if len(task_ids) > 3 else "")
+    elif args.category:
         print(f"Loading tasks for category '{args.category}'...")
         task_ids = get_category_task_ids(args.category)
         run_tag = args.category
@@ -499,7 +509,10 @@ def main():
             task_ids.extend(get_cluster_task_ids(c))
         run_tag = "_".join(str(c) for c in args.clusters)
     else:
-        raise ValueError("Specify --category or --clusters")
+        raise ValueError("Specify --task-ids, --category, or --clusters")
+
+    if args.run_name:
+        run_tag = args.run_name
 
     T = len(task_ids)
     print(f"  {T} tasks")

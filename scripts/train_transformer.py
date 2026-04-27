@@ -35,11 +35,16 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from src.arc_tokenizer import ArcTokenizer, VOCAB_SIZE, PAD
+from src.arc_tokenizer import (
+    ArcTokenizer, VOCAB_SIZE, PAD,
+    START_IN, END_IN, START_OUT, END_OUT, ROW_SEP,
+    F_TOKEN, F_COL, F_ROW, F_CHANGE, F_GRID,
+)
 from src.transformer_model import ArcTransformer
 
 PROJECT_ROOT   = Path(__file__).parent.parent
 RE_ARC_DIR     = PROJECT_ROOT / "data" / "re_arc"
+TOKENIZED_DIR  = PROJECT_ROOT / "data" / "tokenized"
 CLUSTER_FILE   = PROJECT_ROOT / "results" / "cluster_inspection.txt"
 CATEGORIES_FILE = PROJECT_ROOT / "results" / "categories_training.json"
 CKPT_DIR       = PROJECT_ROOT / "checkpoints"
@@ -89,6 +94,24 @@ def load_task_examples(task_id: str) -> dict:
     return {"train": examples[:N_TRAIN], "val": examples[N_TRAIN:]}
 
 
+def load_pretokenized(task_id: str) -> dict | None:
+    """Load pre-tokenized pair arrays from data/tokenized/<task_id>.npz.
+
+    Returns a dict with keys 'train', 'val', 'train_lens', 'val_lens', or
+    None if the file does not exist (caller falls back to live tokenization).
+    """
+    path = TOKENIZED_DIR / f"{task_id}.npz"
+    if not path.exists():
+        return None
+    data = np.load(path)
+    return {
+        "train":      data["train"],       # (800, max_pair_len, 4) int16
+        "val":        data["val"],         # (200, max_pair_len, 4) int16
+        "train_lens": data["train_lens"],  # (800,) int32
+        "val_lens":   data["val_lens"],    # (200,) int32
+    }
+
+
 # ---------------------------------------------------------------------------
 # Augmentation
 # ---------------------------------------------------------------------------
@@ -134,11 +157,172 @@ def encode_one(
     k: int,
     rng: np.random.Generator,
     augment: bool = False,
+    pretok_data: list[dict | None] | None = None,
 ) -> tuple:
     """Encode a single (context, query) sequence for task index ti.
 
-    If augment=True (training only), apply random D4 geometry + color permutation.
+    If pretok_data is provided and the entry for this task is not None, uses
+    pre-tokenized pair arrays from disk (fast path).  Otherwise falls back to
+    live tokenization (original behaviour, preserved exactly).
+
+    Pre-tokenized fast path:
+      - Samples k+1 pair indices from the split.
+      - Loads their (T_pair, 4) arrays (token_id, col, row, color_change).
+      - Assigns grid_number (1=in1, 2=out1, ..., 2k=test_in, 2k+1=test_out).
+      - Applies colour permutation on token_ids 0–9 (background 0 stays 0,
+        colours 1–9 are randomly shuffled) — sufficient augmentation without
+        geometry transforms.
+      - Recomputes color_change for the full assembled sequence in one pass.
+      - Returns (features, loss_mask) as (T, 5) int16 and (T,) bool arrays.
+
+    If augment=True on the live path, applies random D4 geometry + color
+    permutation (original behaviour unchanged).
     """
+    # ------------------------------------------------------------------
+    # Fast path: pre-tokenized arrays available
+    # ------------------------------------------------------------------
+    if pretok_data is not None and pretok_data[ti] is not None:
+        pt = pretok_data[ti]
+        split_key  = "train"      if split == "train" else "val"
+        lens_key   = "train_lens" if split == "train" else "val_lens"
+        pairs_arr  = pt[split_key]   # (N, max_pair_len, 4) int16
+        pair_lens  = pt[lens_key]    # (N,) int32
+        N          = N_TRAIN if split == "train" else N_VAL
+
+        idx = rng.choice(N, size=k + 1, replace=False)
+
+        # Collect unpadded pair arrays: list of (T_pair, 4) int16
+        pair_seqs: list[np.ndarray] = [
+            pairs_arr[i, : pair_lens[i]].copy() for i in idx
+        ]
+
+        # Optional colour permutation on pre-tokenized data.
+        # Only colour token_ids (0–9) are remapped; special tokens are left alone.
+        if augment:
+            perm = np.arange(18, dtype=np.int16)   # identity for all vocab
+            shuffle_idx = (rng.permutation(9) + 1).astype(np.int16)
+            perm[1:10] = shuffle_idx               # remap colours 1–9; 0 stays 0
+            for seq in pair_seqs:
+                color_mask = seq[:, F_TOKEN] <= 9
+                seq[color_mask, F_TOKEN] = perm[seq[color_mask, F_TOKEN]]
+
+        # Build full (T_total, 5) array:
+        #   START | pair0 | pair1 | ... | pair(k-1) | pair(k)[test_in part] END_IN | test_out part
+        # Each pair_seq already contains:
+        #   START_IN ... END_IN START_OUT ... END_OUT
+        # We need to:
+        #   1. Assign grid_numbers.
+        #   2. Prepend the global START token.
+        #   3. Handle test pair specially: keep START_IN…END_IN from pair(k),
+        #      then keep START_OUT…END_OUT (those are the test-output tokens, in loss).
+        #   4. Append END token.
+        #   5. Recompute color_change for the full sequence.
+
+        START_TOK = 11   # arc_tokenizer.START
+        END_TOK   = 16   # arc_tokenizer.END
+
+        segments: list[np.ndarray] = []
+
+        # Global START token
+        start_row = np.array([[START_TOK, 0, 0, 0, 0]], dtype=np.int16)
+        segments.append(start_row)
+
+        # Context pairs: grid_numbers 1=in1, 2=out1, 3=in2, 4=out2, ...
+        for pair_idx in range(k):
+            seq = pair_seqs[pair_idx]           # (T_pair, 4)
+            # Find boundary between input and output halves.
+            # The sequence is: START_IN ... END_IN START_OUT ... END_OUT
+            # END_IN has token_id == END_IN (13); START_OUT follows it.
+            end_in_pos = np.where(seq[:, F_TOKEN] == END_IN)[0]
+            if len(end_in_pos) == 0:
+                raise ValueError("Malformed pre-tokenized pair: END_IN not found")
+            split_pos = end_in_pos[0] + 1      # first token of output half
+
+            in_grid_num  = 2 * pair_idx + 1    # 1, 3, 5, ...
+            out_grid_num = 2 * pair_idx + 2    # 2, 4, 6, ...
+
+            in_half  = seq[:split_pos]          # START_IN ... END_IN
+            out_half = seq[split_pos:]          # START_OUT ... END_OUT
+
+            in_seg  = np.zeros((len(in_half),  5), dtype=np.int16)
+            out_seg = np.zeros((len(out_half), 5), dtype=np.int16)
+            in_seg[:,  :4] = in_half
+            out_seg[:, :4] = out_half
+            in_seg[:,  F_GRID] = in_grid_num
+            out_seg[:, F_GRID] = out_grid_num
+
+            segments.append(in_seg)
+            segments.append(out_seg)
+
+        # Test pair: last sampled pair
+        test_seq     = pair_seqs[k]
+        test_in_gnum = 2 * k + 1
+        test_ou_gnum = 2 * k + 2
+
+        end_in_pos = np.where(test_seq[:, F_TOKEN] == END_IN)[0]
+        if len(end_in_pos) == 0:
+            raise ValueError("Malformed pre-tokenized pair: END_IN not found in test pair")
+        split_pos = end_in_pos[0] + 1
+
+        test_in_half  = test_seq[:split_pos]   # START_IN ... END_IN
+        test_out_half = test_seq[split_pos:]   # START_OUT ... END_OUT
+
+        test_in_seg  = np.zeros((len(test_in_half),  5), dtype=np.int16)
+        test_out_seg = np.zeros((len(test_out_half), 5), dtype=np.int16)
+        test_in_seg[:,  :4] = test_in_half
+        test_out_seg[:, :4] = test_out_half
+        test_in_seg[:,  F_GRID] = test_in_gnum
+        test_out_seg[:, F_GRID] = test_ou_gnum
+
+        segments.append(test_in_seg)
+        segments.append(test_out_seg)
+
+        # Closing END token (grid_number = test_ou_gnum, no spatial pos)
+        end_row = np.array([[END_TOK, 0, 0, 0, test_ou_gnum]], dtype=np.int16)
+        segments.append(end_row)
+
+        features = np.concatenate(segments, axis=0)  # (T_total, 5)
+
+        # Recompute color_change for entire sequence in one vectorised pass.
+        # color_change[t] = 1 iff token[t] is a colour cell (0–9) AND its
+        # colour differs from the previous colour cell.  Special tokens and
+        # the very first colour cell get change=0.
+        is_color = features[:, F_TOKEN] <= 9                          # (T,) bool
+        color_positions = np.where(is_color)[0]
+
+        features[:, F_CHANGE] = 0                                     # reset all
+        if len(color_positions) > 1:
+            prev_cols  = features[color_positions[:-1], F_TOKEN]
+            cur_cols   = features[color_positions[1:],  F_TOKEN]
+            changed    = (cur_cols != prev_cols).astype(np.int16)
+            features[color_positions[1:], F_CHANGE] = changed
+
+        # Build loss_mask: True only for colour/ROW_SEP tokens inside the test
+        # output grid (between START_OUT and END_OUT of the test pair, exclusive).
+        loss_mask = np.zeros(len(features), dtype=bool)
+
+        # Find the START_OUT token that belongs to test_ou_gnum
+        start_out_positions = np.where(
+            (features[:, F_TOKEN] == START_OUT) &
+            (features[:, F_GRID]  == test_ou_gnum)
+        )[0]
+        end_out_positions = np.where(
+            (features[:, F_TOKEN] == END_OUT) &
+            (features[:, F_GRID]  == test_ou_gnum)
+        )[0]
+
+        if len(start_out_positions) > 0 and len(end_out_positions) > 0:
+            so = int(start_out_positions[0])
+            eo = int(end_out_positions[0])
+            # Loss on tokens strictly between START_OUT and END_OUT,
+            # plus END_OUT itself (matching original tokenizer behaviour).
+            loss_mask[so + 1 : eo + 1] = True
+
+        return features, loss_mask
+
+    # ------------------------------------------------------------------
+    # Slow path: live tokenization (original behaviour, unchanged)
+    # ------------------------------------------------------------------
     N = N_TRAIN if split == "train" else N_VAL
     examples = task_data[ti][split]
     idx = rng.choice(N, size=k + 1, replace=False)
@@ -179,19 +363,24 @@ def sample_batch(
     k: int,
     rng: np.random.Generator,
     max_tokens: int = 4000,
+    pretok_data: list[dict | None] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Token-budget batching: pack as many tasks as fit within max_tokens padded length.
 
     Given a list of candidate task indices, greedily adds sequences until the
     padded batch size (n_seqs × max_seq_len) would exceed max_tokens.
     A single sequence that exceeds max_tokens is still processed alone.
+
+    If pretok_data is provided, encode_one will use pre-tokenized pair arrays
+    for tasks that have them, falling back to live tokenization otherwise.
     """
     sequences = []
     cur_max_len = 0
 
     aug = (split == "train")
     for ti in task_indices:
-        seq = encode_one(tokenizer, task_data, ti, split, k, rng, augment=aug)
+        seq = encode_one(tokenizer, task_data, ti, split, k, rng,
+                         augment=aug, pretok_data=pretok_data)
         new_max = max(cur_max_len, seq[0].shape[0])  # seq[0] is (T,5) array
         new_total = (len(sequences) + 1) * new_max
         if sequences and new_total > max_tokens:
@@ -319,6 +508,14 @@ def main():
     task_data = [load_task_examples(tid) for tid in task_ids]
     print("done")
 
+    # Load pre-tokenized pair arrays if available (None for tasks that are missing)
+    pretok_data: list[dict | None] = [load_pretokenized(tid) for tid in task_ids]
+    n_pretok = sum(1 for p in pretok_data if p is not None)
+    if n_pretok > 0:
+        print(f"  Pre-tokenized cache: {n_pretok}/{T} tasks (fast path active)")
+    else:
+        print("  Pre-tokenized cache: none found — using live tokenization")
+
     # Quick sequence length check on first task
     tokenizer = ArcTokenizer()
     ex = task_data[0]["train"]
@@ -393,7 +590,8 @@ def main():
             # Shuffle all tasks and let token-budget batching decide how many to use
             task_idx = rng.permutation(T).tolist()
             batch = sample_batch(tokenizer, task_data, task_idx, "train",
-                                 args.k_context, rng, args.max_tokens)
+                                 args.k_context, rng, args.max_tokens,
+                                 pretok_data=pretok_data)
 
             features  = batch["features"].to(device).long()    # (B, T, 5) int16→int64
             pad_mask  = batch["pad_mask"].to(device)
@@ -436,7 +634,8 @@ def main():
                 # Evaluate each val task individually (avoids padding waste)
                 for vi in [[i] for i in range(T)]:
                     batch = sample_batch(tokenizer, task_data, vi, "val",
-                                         args.k_context, rng, args.max_tokens)
+                                         args.k_context, rng, args.max_tokens,
+                                         pretok_data=pretok_data)
                     features  = batch["features"].to(device).long()    # int16→int64
                     pad_mask  = batch["pad_mask"].to(device)
                     loss_mask = batch["loss_mask"].to(device)

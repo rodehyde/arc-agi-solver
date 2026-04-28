@@ -473,6 +473,8 @@ def main():
     parser.add_argument("--warmup-epochs",   type=int,   default=3,
                         help="Linear LR warmup epochs before cosine decay (0 = no warmup)")
     parser.add_argument("--log",             default=None)
+    parser.add_argument("--ckpt-dir",        default=None,
+                        help="Directory to write checkpoints (default: <repo>/checkpoints)")
     args = parser.parse_args()
 
     if args.log:
@@ -586,7 +588,9 @@ def main():
         no_improve = ckpt.get("no_improve", 0)
         print(f"  Resumed from epoch {ckpt['epoch']}  (best_val_loss={best_val_loss:.4f}, no_improve={no_improve})")
 
-    CKPT_DIR.mkdir(exist_ok=True)
+    if args.ckpt_dir:
+        CKPT_DIR = Path(args.ckpt_dir)
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(42)
     steps = args.steps_per_epoch
 

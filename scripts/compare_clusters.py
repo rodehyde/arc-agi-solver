@@ -159,6 +159,47 @@ def report_group(group_name: str, group_tasks: list[str],
                 print(f"      {mech_line[:120]}")
 
 
+def write_inspection_file(new_labels: dict[str, int],
+                          new_cluster_members: dict[int, list[str]],
+                          new_descs: dict,
+                          out_path: Path) -> None:
+    """Write results/cluster_process_inspection.txt in the same format as cluster_inspection.txt."""
+    cluster_ids = sorted(c for c in new_cluster_members if c != -1)
+    n_clustered = sum(len(new_cluster_members[c]) for c in cluster_ids)
+    n_noise = len(new_cluster_members.get(-1, []))
+    lines = []
+    lines.append(f"Cluster inspection — {len(new_labels)} tasks, {len(cluster_ids)} clusters")
+    lines.append("")
+    lines.append("")
+    for cid in cluster_ids:
+        members = new_cluster_members[cid]
+        lines.append("=" * 60)
+        lines.append(f"Cluster {cid} (n={len(members)})")
+        lines.append("=" * 60)
+        lines.append("")
+        for tid in sorted(members):
+            desc = new_descs.get(tid, "")
+            lines.append(f"  {tid}:")
+            for dline in desc.splitlines():
+                lines.append(f"  {dline}")
+            lines.append("")
+    # Noise section
+    noise_tasks = sorted(new_cluster_members.get(-1, []))
+    if noise_tasks:
+        lines.append("=" * 60)
+        lines.append(f"Noise / unclustered (n={n_noise})")
+        lines.append("=" * 60)
+        lines.append("")
+        for tid in noise_tasks:
+            lines.append(f"  {tid}:")
+            desc = new_descs.get(tid, "")
+            for dline in desc.splitlines():
+                lines.append(f"  {dline}")
+            lines.append("")
+    out_path.write_text("\n".join(lines))
+    print(f"\nWrote {out_path}  ({len(cluster_ids)} clusters, {n_noise} noise)")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--desc-file",        default="data/descriptions_process.json")
@@ -194,6 +235,10 @@ def main():
     new_cluster_members = defaultdict(list)
     for tid, c in new_labels.items():
         new_cluster_members[c].append(tid)
+
+    # ── Save inspection file ──────────────────────────────────────────────────
+    inspection_path = PROJECT_ROOT / "results" / "cluster_process_inspection.txt"
+    write_inspection_file(new_labels, new_cluster_members, new_descs, inspection_path)
 
     # ── Report for each known group ──────────────────────────────────────────
     for group_name, group_tasks in GROUPS.items():

@@ -143,45 +143,50 @@ def main():
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--delay", type=float, default=0.5)
     parser.add_argument("--model", default="claude-haiku-4-5-20251001")
+    parser.add_argument("--output", default=None,
+                        help="Output path (default: data/descriptions_scene.json)")
     parser.add_argument("--force", action="store_true",
                         help="Re-generate even if description already exists")
     args = parser.parse_args()
 
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
 
+    output_path = Path(args.output) if args.output else OUTPUT_PATH
+
     tasks = load_all_tasks()
     if args.limit:
         tasks = tasks[: args.limit]
 
-    descriptions = load_existing(OUTPUT_PATH)
+    descriptions = load_existing(output_path)
     already_done = set(descriptions.keys()) if not args.force else set()
     todo = [t for t in tasks if t["task_id"] not in already_done]
 
     print(f"Tasks total: {len(tasks)}")
     print(f"Already done: {len(already_done)}")
     print(f"To generate: {len(todo)}")
-    print(f"Model: {args.model}\n")
+    print(f"Model: {args.model}")
+    print(f"Output: {output_path}\n")
 
     for i, task in enumerate(todo):
         tid = task["task_id"]
         try:
             desc = generate_description(client, task, args.model)
             descriptions[tid] = desc
-            save(descriptions, OUTPUT_PATH)
+            save(descriptions, output_path)
             print(f"[{i + 1}/{len(todo)}] {tid}: {desc[:80]}...")
         except anthropic.RateLimitError:
             print(f"Rate limited — waiting 60s before retrying {tid}")
             time.sleep(60)
             desc = generate_description(client, task, args.model)
             descriptions[tid] = desc
-            save(descriptions, OUTPUT_PATH)
+            save(descriptions, output_path)
         except Exception as e:
             print(f"ERROR on {tid}: {e}")
             continue
 
         time.sleep(args.delay)
 
-    print(f"\nDone. {len(descriptions)} descriptions saved to {OUTPUT_PATH}")
+    print(f"\nDone. {len(descriptions)} descriptions saved to {output_path}")
 
 
 if __name__ == "__main__":

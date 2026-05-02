@@ -42,12 +42,13 @@ from src.arc_tokenizer import (
 )
 from src.transformer_model import ArcTransformer
 
-PROJECT_ROOT   = Path(__file__).parent.parent
-RE_ARC_DIR     = PROJECT_ROOT / "data" / "re_arc"
-TOKENIZED_DIR  = PROJECT_ROOT / "data" / "tokenized"
-CLUSTER_FILE   = PROJECT_ROOT / "results" / "cluster_inspection.txt"
+PROJECT_ROOT    = Path(__file__).parent.parent
+RE_ARC_DIR      = PROJECT_ROOT / "data" / "re_arc"
+TOKENIZED_DIR   = PROJECT_ROOT / "data" / "tokenized"
+ARC_TRAINING_DIR = PROJECT_ROOT / "data" / "training"
+CLUSTER_FILE    = PROJECT_ROOT / "results" / "cluster_inspection.txt"
 CATEGORIES_FILE = PROJECT_ROOT / "results" / "categories_training.json"
-CKPT_DIR       = PROJECT_ROOT / "checkpoints"
+CKPT_DIR        = PROJECT_ROOT / "checkpoints"
 
 N_TRAIN = 800
 N_VAL   = 200
@@ -435,6 +436,74 @@ def compute_metrics(logits: torch.Tensor, features: torch.Tensor,
 
 
 # ---------------------------------------------------------------------------
+# ARC-based validation (leave-one-out on original training pairs)
+# ---------------------------------------------------------------------------
+
+def _arc_greedy_decode(
+    model: ArcTransformer,
+    tok: ArcTokenizer,
+    ctx: list[tuple[np.ndarray, np.ndarray]],
+    test_in: np.ndarray,
+    H: int, W: int,
+    device: torch.device,
+) -> np.ndarray:
+    """Single greedy decode pass for ARC validation."""
+    k = len(ctx)
+    test_out_gnum = 2 * k + 2
+    feats, _ = tok.encode_sequence(ctx, test_in, test_output=None)
+    feats_trim = feats[:-1]  # drop END
+    start_out = np.array([[START_OUT, 0, 0, 0, test_out_gnum]], dtype=np.int16)
+    feats_full = np.concatenate([feats_trim, start_out], axis=0)
+    prefix   = torch.from_numpy(feats_full).unsqueeze(0).long().to(device)
+    pad_mask = torch.zeros(1, prefix.shape[1], dtype=torch.bool, device=device)
+    with torch.no_grad():
+        return model.generate(prefix, pad_mask, H, W, test_out_gnum)
+
+
+def validate_on_arc(
+    model: ArcTransformer,
+    tok: ArcTokenizer,
+    val_task_ids: list[str],
+    device: torch.device,
+    k_context: int,
+) -> tuple[float, float]:
+    """Leave-one-out evaluation on original ARC training pairs.
+
+    For each task: for each pair i, use the other pairs (up to k_context) as
+    context and greedily decode the output.  Returns (mean_cell_acc, mean_exact).
+    """
+    model.eval()
+    all_accs, all_exacts = [], []
+
+    for tid in val_task_ids:
+        path = ARC_TRAINING_DIR / f"{tid}.json"
+        if not path.exists():
+            continue
+        task  = json.loads(path.read_text())
+        pairs = task["train"]
+        n = len(pairs)
+
+        for hi in range(n):
+            ctx_raw = [p for i, p in enumerate(pairs) if i != hi]
+            tp      = pairs[hi]
+            test_in = np.array(tp["input"],  dtype=np.uint8)
+            target  = np.array(tp["output"], dtype=np.uint8)
+            H, W    = target.shape
+            ctx     = [(np.array(p["input"],  dtype=np.uint8),
+                        np.array(p["output"], dtype=np.uint8))
+                       for p in ctx_raw[:k_context]]
+
+            pred = _arc_greedy_decode(model, tok, ctx, test_in, H, W, device)
+            all_accs.append(float((pred == target).mean()))
+            all_exacts.append(float(np.array_equal(pred, target)))
+
+    model.train()
+    if not all_accs:
+        return 0.0, 0.0
+    return float(np.mean(all_accs)), float(np.mean(all_exacts))
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -475,6 +544,10 @@ def main():
     parser.add_argument("--log",             default=None)
     parser.add_argument("--ckpt-dir",        default=None,
                         help="Directory to write checkpoints (default: <repo>/checkpoints)")
+    parser.add_argument("--val-arc-task-ids", nargs="+", default=None,
+                        help="Task IDs from the val split to use for ARC-based validation. "
+                             "If provided, leave-one-out exact match on original ARC pairs "
+                             "replaces RE-ARC val loss as the checkpoint criterion.")
     args = parser.parse_args()
 
     if args.log:
@@ -576,7 +649,9 @@ def main():
         scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr / 10)
 
     start_epoch = 0
-    best_val_loss = float("inf")
+    # When using ARC exact match as criterion: higher is better, init to 0.
+    # When using RE-ARC val loss:              lower  is better, init to inf.
+    best_val_loss = 0.0 if args.val_arc_task_ids else float("inf")
     no_improve = 0
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device)
@@ -584,7 +659,8 @@ def main():
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt["epoch"] + 1
-        best_val_loss = ckpt.get("best_val_loss", float("inf"))
+        default_best = 0.0 if args.val_arc_task_ids else float("inf")
+        best_val_loss = ckpt.get("best_val_loss", default_best)
         no_improve = ckpt.get("no_improve", 0)
         print(f"  Resumed from epoch {ckpt['epoch']}  (best_val_loss={best_val_loss:.4f}, no_improve={no_improve})")
 
@@ -648,12 +724,12 @@ def main():
             v_loss = v_acc = v_exact = 0.0
             n_vb = 0
             with torch.no_grad():
-                # Evaluate each val task individually (avoids padding waste)
+                # RE-ARC validation (monitoring only)
                 for vi in [[i] for i in range(T)]:
                     batch = sample_batch(tokenizer, task_data, vi, "val",
                                          args.k_context, rng, args.max_tokens,
                                          pretok_data=pretok_data)
-                    features  = batch["features"].to(device).long()    # int16→int64
+                    features  = batch["features"].to(device).long()
                     pad_mask  = batch["pad_mask"].to(device)
                     loss_mask = batch["loss_mask"].to(device)
 
@@ -665,9 +741,20 @@ def main():
                     n_vb += 1
 
             mean_v_loss = v_loss / n_vb
-            improved = mean_v_loss < best_val_loss
+
+            # ARC-based validation: leave-one-out on original training pairs
+            arc_str = ""
+            if args.val_arc_task_ids:
+                arc_acc, arc_exact = validate_on_arc(
+                    model, tokenizer, args.val_arc_task_ids, device, args.k_context
+                )
+                arc_str = f"  |  arc acc={arc_acc:.3f} exact={arc_exact:.3f}"
+                improved = arc_exact > best_val_loss   # best_val_loss reused as best_arc_exact
+            else:
+                improved = mean_v_loss < best_val_loss
+
             if improved:
-                best_val_loss = mean_v_loss
+                best_val_loss = arc_exact if args.val_arc_task_ids else mean_v_loss
                 no_improve = 0
                 p_best = CKPT_DIR / f"transformer_c{run_tag}_best.pt"
                 torch.save({
@@ -687,7 +774,8 @@ def main():
             print(
                 f"Epoch {epoch+1:04d}/{args.epochs}  "
                 f"train loss={ep_loss/max(ep_batches,1):.4f} acc={ep_acc/max(ep_batches,1):.3f} exact={ep_exact/max(ep_batches,1):.3f}  |  "
-                f"val loss={mean_v_loss:.4f} acc={v_acc/n_vb:.3f} exact={v_exact/n_vb:.3f}  "
+                f"val loss={mean_v_loss:.4f} acc={v_acc/n_vb:.3f} exact={v_exact/n_vb:.3f}"
+                f"{arc_str}  "
                 f"({'BEST ' if improved else f'no_improve={no_improve}/{args.patience} ' if args.patience else ''})"
                 f"({time.time()-t0:.1f}s)"
             )

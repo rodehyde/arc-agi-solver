@@ -3,8 +3,9 @@ from .content_features import categorise_content, CONTENT_CATEGORIES
 from .geometric_transforms import categorise_geometric, GEOMETRIC_CATEGORIES
 from .transform_features import categorise_transform, detect_transform_detail, TRANSFORM_CATEGORIES
 from .flood_fill import categorise_flood_fill, FLOOD_FILL_CATEGORIES
+from .logical_ops import categorise_logical_op, LOGICAL_OP_CATEGORIES
 
-CATEGORIES = SIZE_CATEGORIES + CONTENT_CATEGORIES + GEOMETRIC_CATEGORIES + TRANSFORM_CATEGORIES + FLOOD_FILL_CATEGORIES
+CATEGORIES = SIZE_CATEGORIES + CONTENT_CATEGORIES + GEOMETRIC_CATEGORIES + TRANSFORM_CATEGORIES + FLOOD_FILL_CATEGORIES + LOGICAL_OP_CATEGORIES
 
 
 def categorise_task(task: dict) -> list[str]:
@@ -15,6 +16,7 @@ def categorise_task(task: dict) -> list[str]:
         + categorise_geometric(task)
         + categorise_transform(task)
         + categorise_flood_fill(task)
+        + categorise_logical_op(task)
     )
 
 

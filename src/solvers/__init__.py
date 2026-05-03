@@ -8,5 +8,6 @@ Returns the predicted output grid, or None if the solver cannot handle this task
 """
 
 from .geometric import solve_geometric
+from .flood_fill import solve_flood_fill
 
-__all__ = ["solve_geometric"]
+__all__ = ["solve_geometric", "solve_flood_fill"]

@@ -1,0 +1,12 @@
+"""
+Deterministic rule-based solvers for ARC task categories.
+
+Each solver exposes a single function:
+    solve(task, test_input) -> np.ndarray | None
+
+Returns the predicted output grid, or None if the solver cannot handle this task.
+"""
+
+from .geometric import solve_geometric
+
+__all__ = ["solve_geometric"]

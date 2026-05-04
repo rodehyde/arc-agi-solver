@@ -5,7 +5,7 @@ Three inference modes:
   greedy — single forward pass, argmax at each cell position
   tta    — N colour permutations, un-permute predictions, majority-vote per cell
   ttt    — fine-tune on task training pairs for M steps (with augmentation),
-            then run TTA on the fine-tuned copy
+            save the best intermediate model (by LOO cell acc), then run TTA
 
 Evaluation is leave-one-out over the original ARC training pairs for each task:
   for each pair i in task["train"]:
@@ -16,7 +16,7 @@ Evaluation is leave-one-out over the original ARC training pairs for each task:
 Usage (download checkpoint from Colab first):
     python scripts/evaluate.py --checkpoint checkpoints/transformer_cC8_compartment_fill_best.pt
     python scripts/evaluate.py --checkpoint ... --mode tta   --n-perms 20
-    python scripts/evaluate.py --checkpoint ... --mode ttt   --ttt-steps 50 --n-perms 20
+    python scripts/evaluate.py --checkpoint ... --mode ttt   --ttt-steps 200 --n-perms 20
     python scripts/evaluate.py --checkpoint ... --mode all           # compare all three
     python scripts/evaluate.py --checkpoint ... --verbose            # per-pair breakdown
 """
@@ -172,6 +172,37 @@ def tta_decode(
 # TTT: test-time training
 # ---------------------------------------------------------------------------
 
+def _ttt_loo_score(
+    model:       ArcTransformer,
+    tok:         ArcTokenizer,
+    train_pairs: list[dict],
+    k_ctx:       int,
+    device:      torch.device,
+) -> float:
+    """Mean cell accuracy over all LOO configs with no augmentation.
+
+    Used during TTT to track the best intermediate model state.
+    Skipped when train_pairs has only one pair (nothing to hold out).
+    """
+    n = len(train_pairs)
+    accs = []
+    with torch.no_grad():
+        for hi in range(n):
+            ctx_raw = [p for i, p in enumerate(train_pairs) if i != hi]
+            if not ctx_raw:
+                continue
+            tp      = train_pairs[hi]
+            test_in = np.array(tp["input"],  dtype=np.uint8)
+            target  = np.array(tp["output"], dtype=np.uint8)
+            H, W    = target.shape
+            ctx     = [(np.array(p["input"],  dtype=np.uint8),
+                        np.array(p["output"], dtype=np.uint8))
+                       for p in ctx_raw[:k_ctx]]
+            pred = greedy_decode(model, tok, ctx, test_in, H, W, device)
+            accs.append(float((pred == target).mean()))
+    return float(np.mean(accs)) if accs else 0.0
+
+
 def ttt_fine_tune(
     model:       ArcTransformer,
     tok:         ArcTokenizer,
@@ -181,65 +212,101 @@ def ttt_fine_tune(
     device:      torch.device,
     rng:         np.random.Generator,
     k_ctx:       int = 3,
+    batch_size:  int = 8,
+    eval_every:  int = 20,
 ) -> ArcTransformer:
     """Return a fine-tuned *copy* of model (the original model is not modified).
 
-    Fine-tuning uses leave-one-out over train_pairs at each step, with full D4
-    geometric augmentation + colour permutation to maximise data diversity.
+    Improvements over naive TTT:
+    - Batch size > 1: each step trains on `batch_size` differently-augmented
+      versions of the same LOO configuration, giving much richer gradient signal.
+    - Cosine LR decay: starts at `lr`, tapers to lr/100 by the final step.
+    - Save-best: every `eval_every` steps, evaluate clean LOO cell accuracy and
+      keep the model state that achieved the highest score. Guards against the
+      overfitting cliff that occurs with few training pairs.
     """
     ttt = copy.deepcopy(model)
     ttt.train()
-    opt = torch.optim.AdamW(ttt.parameters(), lr=lr, weight_decay=1e-2)
-    n   = len(train_pairs)
+    opt       = torch.optim.AdamW(ttt.parameters(), lr=lr, weight_decay=1e-2)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=n_steps, eta_min=lr * 0.01
+    )
+    n         = len(train_pairs)
+    can_eval  = (n >= 2)   # need ≥2 pairs for meaningful LOO eval
 
-    for _ in range(n_steps):
-        # Leave-one-out: pick test pair, sample up to k_ctx context pairs
+    best_score = -1.0
+    best_state = copy.deepcopy(ttt.state_dict())
+
+    for step in range(n_steps):
+        # Pick one LOO configuration for this step
         test_i  = int(rng.integers(n))
         ctx_idx = [i for i in range(n) if i != test_i]
         if len(ctx_idx) > k_ctx:
             ctx_idx = rng.choice(ctx_idx, size=k_ctx, replace=False).tolist()
 
-        # Collect all grids for joint augmentation
-        grids = []
-        for i in ctx_idx:
-            grids.append(np.array(train_pairs[i]["input"],  dtype=np.uint8))
-            grids.append(np.array(train_pairs[i]["output"], dtype=np.uint8))
-        grids.append(np.array(train_pairs[test_i]["input"],  dtype=np.uint8))
-        grids.append(np.array(train_pairs[test_i]["output"], dtype=np.uint8))
+        # Build batch_size augmented variants of this LOO configuration
+        batch_feats:  list[np.ndarray] = []
+        batch_lmasks: list[np.ndarray] = []
 
-        # D4 geometric augmentation (same transform applied to all grids)
-        k_rot   = int(rng.integers(4))
-        do_flip = rng.random() < 0.5
-        aug = [np.rot90(g, k_rot) for g in grids]
-        if do_flip:
-            aug = [np.fliplr(g) for g in aug]
+        for _ in range(batch_size):
+            # Collect grids
+            grids = []
+            for i in ctx_idx:
+                grids.append(np.array(train_pairs[i]["input"],  dtype=np.uint8))
+                grids.append(np.array(train_pairs[i]["output"], dtype=np.uint8))
+            grids.append(np.array(train_pairs[test_i]["input"],  dtype=np.uint8))
+            grids.append(np.array(train_pairs[test_i]["output"], dtype=np.uint8))
 
-        # Colour permutation (background 0 stays fixed)
-        perm     = np.arange(10, dtype=np.uint8)
-        perm[1:] = rng.permutation(9) + 1
-        aug = [perm[g] for g in aug]
+            # D4 geometric augmentation (same transform applied to all grids)
+            k_rot   = int(rng.integers(4))
+            do_flip = rng.random() < 0.5
+            aug = [np.rot90(g, k_rot) for g in grids]
+            if do_flip:
+                aug = [np.fliplr(g) for g in aug]
 
-        nc    = len(ctx_idx)
-        ctx_p = [(aug[2*j], aug[2*j+1]) for j in range(nc)]
-        ti_g  = aug[2*nc]
-        to_g  = aug[2*nc + 1]
+            # Colour permutation (background 0 stays fixed)
+            perm     = np.arange(10, dtype=np.uint8)
+            perm[1:] = rng.permutation(9) + 1
+            aug = [perm[g] for g in aug]
 
-        feats, lmask = tok.encode_sequence(ctx_p, ti_g, to_g)
-        if not lmask.any():
+            nc    = len(ctx_idx)
+            ctx_p = [(aug[2*j], aug[2*j+1]) for j in range(nc)]
+            ti_g  = aug[2*nc]
+            to_g  = aug[2*nc + 1]
+
+            feats, lmask = tok.encode_sequence(ctx_p, ti_g, to_g)
+            if lmask.any():
+                batch_feats.append(feats)
+                batch_lmasks.append(lmask)
+
+        if not batch_feats:
+            scheduler.step()
             continue
 
-        ft  = torch.from_numpy(feats).unsqueeze(0).long().to(device)
-        lm  = torch.from_numpy(lmask).unsqueeze(0).to(device)
-        pad = torch.zeros(1, ft.shape[1], dtype=torch.bool, device=device)
+        # Stack into a padded batch (sequences within one task are the same
+        # length, so padding is zero or minimal)
+        max_len = max(f.shape[0] for f in batch_feats)
+        B       = len(batch_feats)
+        ft_batch  = torch.zeros(B, max_len, 5, dtype=torch.long,  device=device)
+        lm_batch  = torch.zeros(B, max_len,    dtype=torch.bool,  device=device)
+        pad_batch = torch.ones( B, max_len,    dtype=torch.bool,  device=device)
 
-        logits = ttt(ft, pad)
-        sl = logits[:, :-1].contiguous()
-        st = ft[:, 1:, 0].contiguous()
-        sm = lm[:, 1:].contiguous()
-        fl = sl.reshape(-1, sl.size(-1))
+        for b, (feats, lmask) in enumerate(zip(batch_feats, batch_lmasks)):
+            L = feats.shape[0]
+            ft_batch[b, :L]  = torch.from_numpy(feats).long()
+            lm_batch[b, :L]  = torch.from_numpy(lmask)
+            pad_batch[b, :L] = False
+
+        logits = ttt(ft_batch, pad_batch)
+        sl  = logits[:, :-1].contiguous()
+        st  = ft_batch[:, 1:, 0].contiguous()
+        sm  = lm_batch[:, 1:].contiguous()
+        fl  = sl.reshape(-1, sl.size(-1))
         ft2 = st.reshape(-1)
         fm  = sm.reshape(-1)
+
         if not fm.any():
+            scheduler.step()
             continue
 
         loss = F.cross_entropy(fl[fm], ft2[fm].long())
@@ -247,7 +314,19 @@ def ttt_fine_tune(
         loss.backward()
         torch.nn.utils.clip_grad_norm_(ttt.parameters(), 1.0)
         opt.step()
+        scheduler.step()
 
+        # Save-best: check LOO accuracy periodically
+        if can_eval and (step + 1) % eval_every == 0:
+            ttt.eval()
+            score = _ttt_loo_score(ttt, tok, train_pairs, k_ctx, device)
+            if score > best_score:
+                best_score = score
+                best_state = copy.deepcopy(ttt.state_dict())
+            ttt.train()
+
+    # Restore the best observed state
+    ttt.load_state_dict(best_state)
     ttt.eval()
     return ttt
 
@@ -264,9 +343,12 @@ def ttt_decode(
     device:      torch.device,
     rng:         np.random.Generator,
     k_ctx:       int = 3,
+    batch_size:  int = 8,
+    eval_every:  int = 20,
 ) -> np.ndarray:
     """Fine-tune on available context pairs, then run TTA for the prediction."""
-    ttt = ttt_fine_tune(model, tok, ctx_raw, n_steps, lr, device, rng, k_ctx)
+    ttt = ttt_fine_tune(model, tok, ctx_raw, n_steps, lr, device, rng,
+                        k_ctx, batch_size, eval_every)
     ctx = [(np.array(p["input"],  dtype=np.uint8),
             np.array(p["output"], dtype=np.uint8))
            for p in ctx_raw]
@@ -280,17 +362,19 @@ def ttt_decode(
 # ---------------------------------------------------------------------------
 
 def evaluate_task(
-    task:      dict,
-    model:     ArcTransformer,
-    tok:       ArcTokenizer,
-    mode:      str,
-    n_perms:   int,
-    ttt_steps: int,
-    ttt_lr:    float,
-    device:    torch.device,
-    rng:       np.random.Generator,
-    k_ctx:     int,
-    verbose:   bool,
+    task:           dict,
+    model:          ArcTransformer,
+    tok:            ArcTokenizer,
+    mode:           str,
+    n_perms:        int,
+    ttt_steps:      int,
+    ttt_lr:         float,
+    device:         torch.device,
+    rng:            np.random.Generator,
+    k_ctx:          int,
+    verbose:        bool,
+    ttt_batch_size: int = 8,
+    ttt_eval_every: int = 20,
 ) -> dict:
     train = task["train"]
     accs, exacts = [], []
@@ -311,7 +395,8 @@ def evaluate_task(
             pred = tta_decode(model, tok, ctx, test_in, H, W, n_perms, device, rng)
         else:   # ttt
             pred = ttt_decode(model, tok, ctx_raw, test_in, H, W,
-                              ttt_steps, n_perms, ttt_lr, device, rng, k_ctx)
+                              ttt_steps, n_perms, ttt_lr, device, rng,
+                              k_ctx, ttt_batch_size, ttt_eval_every)
 
         ca = float((pred == target).mean())
         em = bool(np.array_equal(pred, target))
@@ -345,10 +430,14 @@ def main():
                     help="Inference mode (default: all — runs all three for comparison)")
     ap.add_argument("--n-perms",    type=int,   default=20,
                     help="Number of colour permutations for TTA (default: 20)")
-    ap.add_argument("--ttt-steps",  type=int,   default=50,
-                    help="Fine-tuning steps for TTT (default: 50)")
-    ap.add_argument("--ttt-lr",     type=float, default=1e-4,
+    ap.add_argument("--ttt-steps",      type=int,   default=200,
+                    help="Fine-tuning steps for TTT (default: 200)")
+    ap.add_argument("--ttt-lr",         type=float, default=1e-4,
                     help="Learning rate for TTT fine-tuning (default: 1e-4)")
+    ap.add_argument("--ttt-batch-size", type=int,   default=8,
+                    help="Augmented sequences per TTT step (default: 8)")
+    ap.add_argument("--ttt-eval-every", type=int,   default=20,
+                    help="Steps between save-best LOO evaluations (default: 20)")
     ap.add_argument("--k-context",  type=int,   default=3,
                     help="Max context pairs at inference / TTT fine-tune (default: 3)")
     ap.add_argument("--task-ids",   nargs="+",  default=None,
@@ -392,7 +481,8 @@ def main():
         if mode in ("tta", "ttt"):
             hdr += f"  n_perms={args.n_perms}"
         if mode == "ttt":
-            hdr += f"  steps={args.ttt_steps}  lr={args.ttt_lr}"
+            hdr += (f"  steps={args.ttt_steps}  lr={args.ttt_lr}"
+                    f"  batch={args.ttt_batch_size}  eval_every={args.ttt_eval_every}")
         print("=" * 60)
         print(hdr)
         print("=" * 60)
@@ -406,6 +496,7 @@ def main():
                 task, model, tok, mode,
                 args.n_perms, args.ttt_steps, args.ttt_lr,
                 device, rng, args.k_context, args.verbose,
+                args.ttt_batch_size, args.ttt_eval_every,
             )
             results.append(r)
             print(f"  {r['task_id']}  "

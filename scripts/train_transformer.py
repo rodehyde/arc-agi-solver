@@ -95,6 +95,88 @@ def load_task_examples(task_id: str) -> dict:
     return {"train": examples[:N_TRAIN], "val": examples[N_TRAIN:]}
 
 
+def load_arc_pairs(task_id: str) -> list[dict]:
+    """Load the original ARC training pairs (2–10 per task) as numpy arrays."""
+    path = ARC_TRAINING_DIR / f"{task_id}.json"
+    raw = json.load(open(path))
+    return [
+        {"input":  np.array(p["input"],  dtype=np.uint8),
+         "output": np.array(p["output"], dtype=np.uint8)}
+        for p in raw["train"]
+    ]
+
+
+def encode_one_arc(
+    tokenizer: ArcTokenizer,
+    pairs:     list[dict],
+    k:         int,
+    rng:       np.random.Generator,
+) -> tuple:
+    """Encode one (context, query) sequence from original ARC pairs.
+
+    Uses leave-one-out: one pair is held out as the query, up to k others
+    are used as context.  D4 geometric augmentation + colour permutation are
+    applied jointly to all grids so the rule relationship is preserved.
+
+    k is capped at len(pairs) - 1 so tasks with only 2 pairs always work.
+    """
+    n      = len(pairs)
+    k_eff  = min(k, n - 1)          # cap: need at least 1 pair as query
+    test_i = int(rng.integers(n))
+    ctx_idx = [i for i in range(n) if i != test_i]
+    if len(ctx_idx) > k_eff:
+        ctx_idx = rng.choice(ctx_idx, size=k_eff, replace=False).tolist()
+
+    # Collect all grids for joint augmentation
+    all_pairs = [pairs[i] for i in ctx_idx] + [pairs[test_i]]
+    grids = []
+    for p in all_pairs:
+        grids.append(p["input"].copy())
+        grids.append(p["output"].copy())
+
+    # D4 geometric augmentation (same transform for every grid)
+    k_rot   = int(rng.integers(4))
+    do_flip = rng.random() < 0.5
+    grids   = [np.rot90(g, k_rot) for g in grids]
+    if do_flip:
+        grids = [np.fliplr(g) for g in grids]
+
+    # Colour permutation (background 0 stays fixed)
+    grids = augment_color(grids, rng)
+
+    # Reconstruct pairs
+    aug_pairs = [(grids[i * 2], grids[i * 2 + 1]) for i in range(len(all_pairs))]
+    ctx      = aug_pairs[:-1]
+    test_inp, test_out = aug_pairs[-1]
+
+    return tokenizer.encode_sequence(ctx, test_inp, test_out)
+
+
+def sample_batch_arc(
+    tokenizer:    ArcTokenizer,
+    arc_data:     list[list[dict]],   # one list-of-pairs per task
+    task_indices: list[int],
+    k:            int,
+    rng:          np.random.Generator,
+    max_tokens:   int = 4000,
+) -> dict[str, torch.Tensor]:
+    """Token-budget batching using original ARC pairs with LOO + augmentation."""
+    sequences  = []
+    cur_max_len = 0
+
+    for ti in task_indices:
+        seq     = encode_one_arc(tokenizer, arc_data[ti], k, rng)
+        new_max = max(cur_max_len, seq[0].shape[0])
+        new_total = (len(sequences) + 1) * new_max
+        if sequences and new_total > max_tokens:
+            break
+        sequences.append(seq)
+        cur_max_len = new_max
+
+    batch = tokenizer.pad_batch(sequences)
+    return {k_: torch.from_numpy(v) for k_, v in batch.items()}
+
+
 def load_pretokenized(task_id: str) -> dict | None:
     """Load pre-tokenized pair arrays from data/tokenized/<task_id>.npz.
 
@@ -548,6 +630,10 @@ def main():
                         help="Task IDs from the val split to use for ARC-based validation. "
                              "If provided, leave-one-out exact match on original ARC pairs "
                              "replaces RE-ARC val loss as the checkpoint criterion.")
+    parser.add_argument("--data-source", default="rearc", choices=["rearc", "arc"],
+                        help="Training data source: 'rearc' (default) uses RE-ARC synthetic "
+                             "examples; 'arc' uses original ARC training pairs with LOO + "
+                             "D4/colour augmentation.")
     args = parser.parse_args()
 
     if args.log:
@@ -592,24 +678,49 @@ def main():
     T = len(task_ids)
     print(f"  {T} tasks")
 
-    print("  Loading RE-ARC examples...", end=" ", flush=True)
-    task_data = [load_task_examples(tid) for tid in task_ids]
-    print("done")
-
-    # Load pre-tokenized pair arrays if available (None for tasks that are missing)
-    pretok_data: list[dict | None] = [load_pretokenized(tid) for tid in task_ids]
-    n_pretok = sum(1 for p in pretok_data if p is not None)
-    if n_pretok > 0:
-        print(f"  Pre-tokenized cache: {n_pretok}/{T} tasks (fast path active)")
-    else:
-        print("  Pre-tokenized cache: none found — using live tokenization")
-
-    # Quick sequence length check on first task
     tokenizer = ArcTokenizer()
-    ex = task_data[0]["train"]
-    ctx = [(ex[i]["input"], ex[i]["output"]) for i in range(args.k_context)]
-    sample_feats, _ = tokenizer.encode_sequence(ctx, ex[3]["input"], ex[3]["output"])
-    print(f"  Example sequence length (task 0): {len(sample_feats)} tokens")
+
+    if args.data_source == "arc":
+        print("  Loading original ARC pairs...", end=" ", flush=True)
+        arc_data = [load_arc_pairs(tid) for tid in task_ids]
+        print("done")
+        task_data  = None
+        pretok_data = None
+
+        # Sequence-length check using the first task's actual pairs
+        ex_pairs = arc_data[0]
+        k_eff = min(args.k_context, len(ex_pairs) - 1)
+        ctx_ex = [(p["input"], p["output"]) for p in ex_pairs[:k_eff]]
+        sample_feats, _ = tokenizer.encode_sequence(
+            ctx_ex, ex_pairs[k_eff]["input"], ex_pairs[k_eff]["output"]
+        )
+        print(f"  Example sequence length (task 0, k={k_eff}): {len(sample_feats)} tokens")
+
+        # ARC mode: always use ARC-exact-match as checkpoint criterion.
+        # If the user didn't provide explicit val task IDs, validate on all training tasks
+        # (LOO within each task still gives a fair estimate of generalisation).
+        if args.val_arc_task_ids is None:
+            args.val_arc_task_ids = task_ids
+            print(f"  ARC mode: using all {len(task_ids)} task(s) for ARC LOO validation")
+    else:
+        print("  Loading RE-ARC examples...", end=" ", flush=True)
+        task_data = [load_task_examples(tid) for tid in task_ids]
+        print("done")
+        arc_data = None
+
+        # Load pre-tokenized pair arrays if available (None for tasks that are missing)
+        pretok_data: list[dict | None] = [load_pretokenized(tid) for tid in task_ids]
+        n_pretok = sum(1 for p in pretok_data if p is not None)
+        if n_pretok > 0:
+            print(f"  Pre-tokenized cache: {n_pretok}/{T} tasks (fast path active)")
+        else:
+            print("  Pre-tokenized cache: none found — using live tokenization")
+
+        # Quick sequence length check on first task
+        ex = task_data[0]["train"]
+        ctx = [(ex[i]["input"], ex[i]["output"]) for i in range(args.k_context)]
+        sample_feats, _ = tokenizer.encode_sequence(ctx, ex[3]["input"], ex[3]["output"])
+        print(f"  Example sequence length (task 0): {len(sample_feats)} tokens")
 
     # ------------------------------------------------------------------
     # Model
@@ -682,9 +793,13 @@ def main():
         for _ in range(steps):
             # Shuffle all tasks and let token-budget batching decide how many to use
             task_idx = rng.permutation(T).tolist()
-            batch = sample_batch(tokenizer, task_data, task_idx, "train",
-                                 args.k_context, rng, args.max_tokens,
-                                 pretok_data=pretok_data)
+            if args.data_source == "arc":
+                batch = sample_batch_arc(tokenizer, arc_data, task_idx,
+                                         args.k_context, rng, args.max_tokens)
+            else:
+                batch = sample_batch(tokenizer, task_data, task_idx, "train",
+                                     args.k_context, rng, args.max_tokens,
+                                     pretok_data=pretok_data)
 
             features  = batch["features"].to(device).long()    # (B, T, 5) int16→int64
             pad_mask  = batch["pad_mask"].to(device)
@@ -723,24 +838,26 @@ def main():
             model.eval()
             v_loss = v_acc = v_exact = 0.0
             n_vb = 0
-            with torch.no_grad():
-                # RE-ARC validation (monitoring only)
-                for vi in [[i] for i in range(T)]:
-                    batch = sample_batch(tokenizer, task_data, vi, "val",
-                                         args.k_context, rng, args.max_tokens,
-                                         pretok_data=pretok_data)
-                    features  = batch["features"].to(device).long()
-                    pad_mask  = batch["pad_mask"].to(device)
-                    loss_mask = batch["loss_mask"].to(device)
 
-                    logits = model(features, pad_mask)
-                    m = compute_metrics(logits, features, loss_mask)
-                    v_loss  += m["loss"]
-                    v_acc   += m["cell_acc"]
-                    v_exact += m["exact_match"]
-                    n_vb += 1
+            if args.data_source != "arc":
+                with torch.no_grad():
+                    # RE-ARC validation (monitoring only — skipped in arc mode)
+                    for vi in [[i] for i in range(T)]:
+                        batch = sample_batch(tokenizer, task_data, vi, "val",
+                                             args.k_context, rng, args.max_tokens,
+                                             pretok_data=pretok_data)
+                        features  = batch["features"].to(device).long()
+                        pad_mask  = batch["pad_mask"].to(device)
+                        loss_mask = batch["loss_mask"].to(device)
 
-            mean_v_loss = v_loss / n_vb
+                        logits = model(features, pad_mask)
+                        m = compute_metrics(logits, features, loss_mask)
+                        v_loss  += m["loss"]
+                        v_acc   += m["cell_acc"]
+                        v_exact += m["exact_match"]
+                        n_vb += 1
+
+            mean_v_loss = v_loss / max(n_vb, 1)
 
             # ARC-based validation: leave-one-out on original training pairs
             arc_str = ""
@@ -771,10 +888,11 @@ def main():
                 no_improve += 1
 
             stop_flag = args.patience > 0 and no_improve >= args.patience
+            _nvb = max(n_vb, 1)
             print(
                 f"Epoch {epoch+1:04d}/{args.epochs}  "
                 f"train loss={ep_loss/max(ep_batches,1):.4f} acc={ep_acc/max(ep_batches,1):.3f} exact={ep_exact/max(ep_batches,1):.3f}  |  "
-                f"val loss={mean_v_loss:.4f} acc={v_acc/n_vb:.3f} exact={v_exact/n_vb:.3f}"
+                f"val loss={mean_v_loss:.4f} acc={v_acc/_nvb:.3f} exact={v_exact/_nvb:.3f}"
                 f"{arc_str}  "
                 f"({'BEST ' if improved else f'no_improve={no_improve}/{args.patience} ' if args.patience else ''})"
                 f"({time.time()-t0:.1f}s)"

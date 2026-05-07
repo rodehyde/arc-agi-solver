@@ -21,6 +21,8 @@ results/cluster_plots/
 
 # ARC data (download separately via instructions in README)
 data/
+!data/larc/
+!data/finetune/split_info.json
 
 # macOS
 .DS_Store

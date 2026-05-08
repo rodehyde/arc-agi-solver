@@ -41,10 +41,21 @@ EVAL_PER_CATEGORY = 4          # tasks held out per broad category
 VAL_FRACTION      = 0.10       # fraction of remaining tasks used for val
 EOT               = "<|endoftext|>"
 
-PROJECT_ROOT  = Path(__file__).parent.parent
-ARC_DIR       = PROJECT_ROOT / "data" / "training"
-LARC_DIR      = PROJECT_ROOT / "data" / "larc"
-OUT_DIR       = PROJECT_ROOT / "data" / "finetune"
+PROJECT_ROOT             = Path(__file__).parent.parent
+ARC_DIR                  = PROJECT_ROOT / "data" / "training"
+LARC_DIR                 = PROJECT_ROOT / "data" / "larc"
+OUT_DIR                  = PROJECT_ROOT / "data" / "finetune"
+CLAUDE_DESCRIPTIONS_FILE = PROJECT_ROOT / "data" / "claude_descriptions.json"
+
+# Map Claude TYPE labels → broad categories
+CLAUDE_TYPE_MAP = {
+    "geometric": "GEOMETRIC",
+    "fill":      "FILL",
+    "count":     "CLASSIFY_COUNT",
+    "extend":    "EXTEND",
+    "crop":      "CROP_EXTRACT",
+    "other":     "OTHER",
+}
 
 # ---------------------------------------------------------------------------
 # Broad category keyword matching (same logic as descriptions_process.json)
@@ -154,17 +165,40 @@ def load_arc_tasks() -> dict[str, dict]:
 # Load broad categories from descriptions_process.json
 # ---------------------------------------------------------------------------
 
-def load_categories() -> dict[str, str]:
-    """Return {task_id: broad_category}."""
-    path = PROJECT_ROOT / "data" / "descriptions_process.json"
-    if not path.exists():
+def load_claude_descriptions() -> dict[str, str]:
+    """Return {task_id: full_description_text} from Claude-generated descriptions."""
+    if not CLAUDE_DESCRIPTIONS_FILE.exists():
         return {}
-    raw = json.loads(path.read_text())
-    type_re = re.compile(r"TYPE:\s*([^\n]+)", re.IGNORECASE)
-    cats = {}
-    for tid, text in raw.items():
-        m = type_re.search(text)
-        cats[tid] = assign_category(m.group(1).strip()) if m else "OTHER"
+    return json.loads(CLAUDE_DESCRIPTIONS_FILE.read_text())
+
+
+def load_categories(claude_descs: dict[str, str] | None = None) -> dict[str, str]:
+    """Return {task_id: broad_category}.
+
+    Claude TYPE labels take priority; falls back to keyword matching on
+    descriptions_process.json for any tasks not covered by Claude.
+    """
+    cats: dict[str, str] = {}
+
+    # Claude descriptions carry explicit TYPE labels — most reliable source
+    if claude_descs:
+        type_re = re.compile(r"^TYPE:\s*(\w+)", re.IGNORECASE | re.MULTILINE)
+        for tid, desc in claude_descs.items():
+            m = type_re.search(desc)
+            if m:
+                label = m.group(1).strip().lower()
+                cats[tid] = CLAUDE_TYPE_MAP.get(label, "OTHER")
+
+    # Fallback: keyword matching on older descriptions_process.json
+    path = PROJECT_ROOT / "data" / "descriptions_process.json"
+    if path.exists():
+        raw = json.loads(path.read_text())
+        type_re2 = re.compile(r"TYPE:\s*([^\n]+)", re.IGNORECASE)
+        for tid, text in raw.items():
+            if tid not in cats:
+                m = type_re2.search(text)
+                cats[tid] = assign_category(m.group(1).strip()) if m else "OTHER"
+
     return cats
 
 
@@ -180,18 +214,21 @@ def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("Loading data...")
-    arc_tasks  = load_arc_tasks()
-    larc_rules = load_larc()
-    categories = load_categories()
+    arc_tasks   = load_arc_tasks()
+    larc_rules  = load_larc()
+    claude_descs = load_claude_descriptions()
+    categories  = load_categories(claude_descs)
 
-    print(f"  ARC tasks with test output : {len(arc_tasks)}")
+    print(f"  ARC tasks with test output  : {len(arc_tasks)}")
     print(f"  Tasks with LARC descriptions: {len(larc_rules)}")
+    print(f"  Tasks with Claude descriptions: {len(claude_descs)}")
 
     # ------------------------------------------------------------------
     # Build candidate pool: (task_id, rule, token_count, text)
     # ------------------------------------------------------------------
     pool: dict[str, list[dict]] = defaultdict(list)   # task_id -> examples
 
+    # LARC descriptions
     for tid, rules in larc_rules.items():
         if tid not in arc_tasks:
             continue
@@ -205,11 +242,30 @@ def main():
                     "rule":    rule,
                     "tokens":  len(tokens),
                     "text":    text,
+                    "source":  "larc",
                 })
 
+    # Claude descriptions (TYPE / RULE / STEPS / RELATIONSHIP block)
+    for tid, desc in claude_descs.items():
+        if tid not in arc_tasks:
+            continue
+        task = arc_tasks[tid]
+        text = format_example(task, desc)
+        tokens = enc.encode_ordinary(text)
+        if len(tokens) <= MAX_TOKENS:
+            pool[tid].append({
+                "task_id": tid,
+                "rule":    desc,
+                "tokens":  len(tokens),
+                "text":    text,
+                "source":  "claude",
+            })
+
     eligible_tasks = list(pool.keys())
+    n_larc   = sum(1 for v in pool.values() for ex in v if ex.get("source") == "larc")
+    n_claude = sum(1 for v in pool.values() for ex in v if ex.get("source") == "claude")
     print(f"  Eligible tasks (≤{MAX_TOKENS} tokens): {len(eligible_tasks)}")
-    print(f"  Total (task, description) examples  : {sum(len(v) for v in pool.values())}")
+    print(f"  Examples — LARC: {n_larc}  Claude: {n_claude}  Total: {n_larc + n_claude}")
 
     # ------------------------------------------------------------------
     # Stratified eval split: EVAL_PER_CATEGORY tasks per category

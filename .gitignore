@@ -23,6 +23,7 @@ results/cluster_plots/
 data/
 !data/larc/
 !data/finetune/split_info.json
+!data/claude_descriptions.json
 
 # macOS
 .DS_Store

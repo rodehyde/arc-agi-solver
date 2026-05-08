@@ -5,7 +5,7 @@ out_dir = 'out-arc'
 eval_interval = 50
 eval_iters = 50
 log_interval = 10
-always_save_checkpoint = True   # save whenever val loss improves
+always_save_checkpoint = False  # only save when val loss improves (best model wins)
 
 wandb_log = False
 

@@ -19,7 +19,7 @@ init_from = 'gpt2'
 
 # Optimizer
 learning_rate = 3e-5
-max_iters = 200          # best checkpoint was at step 200; stop here
+max_iters = 500          # val loss still falling at 200; save-best handles early stop
 weight_decay = 0.1
 beta1 = 0.9
 beta2 = 0.95
@@ -28,7 +28,7 @@ grad_clip = 1.0
 # LR schedule: linear warmup then cosine decay to min_lr
 decay_lr = True
 warmup_iters = 50
-lr_decay_iters = 200
+lr_decay_iters = 500
 min_lr = 3e-6
 
 # System

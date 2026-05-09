@@ -110,7 +110,8 @@ def format_example(task: dict, rule: str) -> str:
     test = task["test"][0]
     parts.append(f"Test Input:\n{format_grid(test['input'])}")
     parts.append(f"Rule: {rule}")
-    parts.append(f"Test Output:\n{format_grid(test['output'])}")
+    # Stage 1 only predicts the rule — no Test Output in training text.
+    # Stage 2 (grid generator) is a separate model trained later.
     return "\n\n".join(parts)
 
 

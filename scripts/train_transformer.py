@@ -46,6 +46,7 @@ PROJECT_ROOT    = Path(__file__).parent.parent
 RE_ARC_DIR      = PROJECT_ROOT / "data" / "re_arc"
 TOKENIZED_DIR   = PROJECT_ROOT / "data" / "tokenized"
 ARC_TRAINING_DIR = PROJECT_ROOT / "data" / "training"
+BARC_DIR        = PROJECT_ROOT / "data" / "barc"
 CLUSTER_FILE    = PROJECT_ROOT / "results" / "cluster_inspection.txt"
 CATEGORIES_FILE = PROJECT_ROOT / "results" / "categories_training.json"
 CKPT_DIR        = PROJECT_ROOT / "checkpoints"
@@ -95,9 +96,13 @@ def load_task_examples(task_id: str) -> dict:
     return {"train": examples[:N_TRAIN], "val": examples[N_TRAIN:]}
 
 
-def load_arc_pairs(task_id: str) -> list[dict]:
-    """Load the original ARC training pairs (2–10 per task) as numpy arrays."""
-    path = ARC_TRAINING_DIR / f"{task_id}.json"
+def load_arc_pairs(task_id: str, data_dir: Path | None = None) -> list[dict]:
+    """Load ARC (or BARC) training pairs as numpy arrays.
+
+    data_dir defaults to ARC_TRAINING_DIR.  Pass BARC_DIR (or any other
+    directory) to load from an alternative location.
+    """
+    path = (data_dir or ARC_TRAINING_DIR) / f"{task_id}.json"
     raw = json.load(open(path))
     return [
         {"input":  np.array(p["input"],  dtype=np.uint8),
@@ -634,6 +639,14 @@ def main():
                         help="Training data source: 'rearc' (default) uses RE-ARC synthetic "
                              "examples; 'arc' uses original ARC training pairs with LOO + "
                              "D4/colour augmentation.")
+    parser.add_argument("--n-barc", type=int, default=0,
+                        help="Number of BARC synthetic tasks to add to the training pool from "
+                             "data/barc/ (0=disabled).  Tasks are taken in sorted filename "
+                             "order.  Requires data_source='arc' or 'rearc' — BARC pairs are "
+                             "loaded with the same LOO+augmentation logic as ARC pairs.")
+    parser.add_argument("--barc-dir", default=None,
+                        help="Directory containing BARC task JSON files "
+                             "(default: data/barc/ relative to repo root)")
     args = parser.parse_args()
 
     if args.log:
@@ -687,6 +700,24 @@ def main():
         task_data  = None
         pretok_data = None
 
+        # ── BARC augmentation ────────────────────────────────────────────────
+        n_arc_tasks = len(task_ids)      # save before any BARC extension
+        if args.n_barc > 0:
+            barc_dir = Path(args.barc_dir) if args.barc_dir else BARC_DIR
+            if not barc_dir.exists():
+                print(f"  WARNING: --n-barc={args.n_barc} but {barc_dir} not found — skipping")
+            else:
+                barc_ids = sorted(p.stem for p in barc_dir.glob("*.json"))[:args.n_barc]
+                print(f"  Loading {len(barc_ids)} BARC tasks from {barc_dir}...",
+                      end=" ", flush=True)
+                barc_pairs = [load_arc_pairs(tid, barc_dir) for tid in barc_ids]
+                print("done")
+                arc_data = arc_data + barc_pairs
+                task_ids = task_ids + barc_ids
+                T = len(task_ids)
+                print(f"  Combined pool: {T} tasks "
+                      f"({n_arc_tasks} ARC + {len(barc_ids)} BARC)")
+
         # Sequence-length check using the first task's actual pairs
         ex_pairs = arc_data[0]
         k_eff = min(args.k_context, len(ex_pairs) - 1)
@@ -697,11 +728,12 @@ def main():
         print(f"  Example sequence length (task 0, k={k_eff}): {len(sample_feats)} tokens")
 
         # ARC mode: always use ARC-exact-match as checkpoint criterion.
-        # If the user didn't provide explicit val task IDs, validate on all training tasks
-        # (LOO within each task still gives a fair estimate of generalisation).
+        # Validate only on original ARC task IDs (not BARC) so the metric is
+        # comparable across runs with and without BARC.
         if args.val_arc_task_ids is None:
-            args.val_arc_task_ids = task_ids
-            print(f"  ARC mode: using all {len(task_ids)} task(s) for ARC LOO validation")
+            arc_only_ids = task_ids[:n_arc_tasks]   # original ARC tasks only
+            args.val_arc_task_ids = arc_only_ids
+            print(f"  ARC mode: using {len(arc_only_ids)} ARC task(s) for LOO validation")
     else:
         print("  Loading RE-ARC examples...", end=" ", flush=True)
         task_data = [load_task_examples(tid) for tid in task_ids]

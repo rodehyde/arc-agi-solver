@@ -117,6 +117,26 @@ def majority_vote(preds: list[np.ndarray]) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# D4 geometric symmetry group helpers (for geometric TTA)
+# ---------------------------------------------------------------------------
+
+# 8 orientations: 4 rotations × 2 reflections (identity = k_rot=0, flip=False)
+_D4 = [(k, f) for f in (False, True) for k in range(4)]
+
+
+def _d4_apply(grid: np.ndarray, k_rot: int, flip: bool) -> np.ndarray:
+    g = np.rot90(grid, k_rot)
+    return np.fliplr(g) if flip else g
+
+
+def _d4_reverse(grid: np.ndarray, k_rot: int, flip: bool) -> np.ndarray:
+    """Undo a D4 transform applied by _d4_apply with the same (k_rot, flip)."""
+    if flip:
+        grid = np.fliplr(grid)
+    return np.rot90(grid, -k_rot % 4)
+
+
+# ---------------------------------------------------------------------------
 # Greedy decode
 # ---------------------------------------------------------------------------
 
@@ -146,24 +166,41 @@ def tta_decode(
     n_perms: int,
     device:  torch.device,
     rng:     np.random.Generator,
+    n_d4:    int = 8,
 ) -> np.ndarray:
-    """Run model N times with random colour permutations, un-permute, majority vote.
+    """Run model with D4 geometric TTA × colour permutations, majority vote.
 
-    Colour 0 (background) is never remapped.  Colours 1-9 are randomly shuffled,
-    consistently across the context pairs and the test input.  Each prediction is
-    un-permuted before voting so all votes are in the original colour space.
+    For each of n_d4 geometric orientations (from the D4 group), the transform is
+    applied to all context and test grids.  Within each orientation, n_perms
+    colour-permuted copies are generated.  All predictions are reverse-transformed
+    and majority-voted in the original coordinate frame.
+
+    Total evaluations: n_d4 × n_perms.  Set n_d4=1 for colour-only TTA (identity
+    orientation only); n_d4=8 uses all D4 symmetries.  Colour 0 (background) is
+    never remapped.  90°/270° rotations correctly swap H ↔ W for generation.
     """
     preds = []
-    for _ in range(n_perms):
-        perm     = np.arange(10, dtype=np.uint8)
-        perm[1:] = rng.permutation(9) + 1
-        inv_perm = np.zeros(10, dtype=np.uint8)
-        for i, v in enumerate(perm):
-            inv_perm[v] = i
+    for k_rot, do_flip in _D4[:n_d4]:
+        # Apply D4 transform to all context and test grids
+        d4_ctx     = [(_d4_apply(inp, k_rot, do_flip),
+                       _d4_apply(out, k_rot, do_flip)) for inp, out in ctx]
+        d4_test_in = _d4_apply(test_in, k_rot, do_flip)
+        # Output dims in transformed space — 90°/270° swaps H ↔ W
+        H_t = W if k_rot % 2 else H
+        W_t = H if k_rot % 2 else W
 
-        perm_ctx = [(perm[inp], perm[out]) for inp, out in ctx]
-        pred_perm = greedy_decode(model, tok, perm_ctx, perm[test_in], H, W, device)
-        preds.append(inv_perm[pred_perm])
+        for _ in range(n_perms):
+            perm     = np.arange(10, dtype=np.uint8)
+            perm[1:] = rng.permutation(9) + 1
+            inv_perm = np.zeros(10, dtype=np.uint8)
+            for i, v in enumerate(perm):
+                inv_perm[v] = i
+
+            perm_ctx = [(perm[inp], perm[out]) for inp, out in d4_ctx]
+            pred_t   = greedy_decode(model, tok, perm_ctx, perm[d4_test_in],
+                                     H_t, W_t, device)
+            pred     = _d4_reverse(inv_perm[pred_t], k_rot, do_flip)
+            preds.append(pred)
 
     return majority_vote(preds)
 
@@ -345,6 +382,7 @@ def ttt_decode(
     k_ctx:       int = 3,
     batch_size:  int = 8,
     eval_every:  int = 20,
+    n_d4:        int = 8,
 ) -> np.ndarray:
     """Fine-tune on available context pairs, then run TTA for the prediction."""
     ttt = ttt_fine_tune(model, tok, ctx_raw, n_steps, lr, device, rng,
@@ -353,7 +391,7 @@ def ttt_decode(
             np.array(p["output"], dtype=np.uint8))
            for p in ctx_raw]
     if n_perms > 1:
-        return tta_decode(ttt, tok, ctx, test_in, H, W, n_perms, device, rng)
+        return tta_decode(ttt, tok, ctx, test_in, H, W, n_perms, device, rng, n_d4)
     return greedy_decode(ttt, tok, ctx, test_in, H, W, device)
 
 
@@ -375,6 +413,7 @@ def evaluate_task(
     verbose:        bool,
     ttt_batch_size: int = 8,
     ttt_eval_every: int = 20,
+    n_d4:           int = 8,
 ) -> dict:
     train = task["train"]
     accs, exacts = [], []
@@ -392,11 +431,11 @@ def evaluate_task(
         if mode == "greedy":
             pred = greedy_decode(model, tok, ctx, test_in, H, W, device)
         elif mode == "tta":
-            pred = tta_decode(model, tok, ctx, test_in, H, W, n_perms, device, rng)
+            pred = tta_decode(model, tok, ctx, test_in, H, W, n_perms, device, rng, n_d4)
         else:   # ttt
             pred = ttt_decode(model, tok, ctx_raw, test_in, H, W,
                               ttt_steps, n_perms, ttt_lr, device, rng,
-                              k_ctx, ttt_batch_size, ttt_eval_every)
+                              k_ctx, ttt_batch_size, ttt_eval_every, n_d4)
 
         ca = float((pred == target).mean())
         em = bool(np.array_equal(pred, target))
@@ -429,7 +468,9 @@ def main():
                     choices=["greedy", "tta", "ttt", "all"],
                     help="Inference mode (default: all — runs all three for comparison)")
     ap.add_argument("--n-perms",    type=int,   default=20,
-                    help="Number of colour permutations for TTA (default: 20)")
+                    help="Number of colour permutations per D4 orientation for TTA (default: 20)")
+    ap.add_argument("--n-d4",       type=int,   default=8,
+                    help="D4 orientations for geometric TTA: 1=colour-only, 8=all D4 symmetries (default: 8)")
     ap.add_argument("--ttt-steps",      type=int,   default=200,
                     help="Fine-tuning steps for TTT (default: 200)")
     ap.add_argument("--ttt-lr",         type=float, default=1e-4,
@@ -479,7 +520,7 @@ def main():
     for mode in modes:
         hdr = f" {mode.upper()}"
         if mode in ("tta", "ttt"):
-            hdr += f"  n_perms={args.n_perms}"
+            hdr += f"  n_perms={args.n_perms}  n_d4={args.n_d4}"
         if mode == "ttt":
             hdr += (f"  steps={args.ttt_steps}  lr={args.ttt_lr}"
                     f"  batch={args.ttt_batch_size}  eval_every={args.ttt_eval_every}")
@@ -496,7 +537,7 @@ def main():
                 task, model, tok, mode,
                 args.n_perms, args.ttt_steps, args.ttt_lr,
                 device, rng, args.k_context, args.verbose,
-                args.ttt_batch_size, args.ttt_eval_every,
+                args.ttt_batch_size, args.ttt_eval_every, args.n_d4,
             )
             results.append(r)
             print(f"  {r['task_id']}  "

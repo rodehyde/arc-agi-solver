@@ -23,6 +23,7 @@ Usage (download checkpoint from Colab first):
 
 import argparse
 import copy
+import datetime
 import json
 import sys
 import time
@@ -101,6 +102,122 @@ def build_prefix(
     prefix   = torch.from_numpy(feats_full).unsqueeze(0).long()    # (1, T, 5)
     pad_mask = torch.zeros(1, prefix.shape[1], dtype=torch.bool)
     return prefix, pad_mask, test_out_gnum
+
+
+# ---------------------------------------------------------------------------
+# Error analysis helpers
+# ---------------------------------------------------------------------------
+
+def _severity(cell_acc: float) -> str:
+    """Bucket a cell accuracy into a human-readable severity label."""
+    if cell_acc >= 1.0: return "perfect"
+    if cell_acc >= 0.9: return "close"
+    if cell_acc >= 0.5: return "partial"
+    if cell_acc > 0.0:  return "far"
+    return "total"
+
+
+def save_analysis(
+    results:    list[dict],
+    mode:       str,
+    ckpt_path:  str,
+    out_path:   Path,
+) -> None:
+    """Print a ranked error-analysis report and save full detail to JSON.
+
+    The report covers:
+    - Severity distribution (perfect / close / partial / far / total)
+    - Bottom-N tasks by cell accuracy (worst failures)
+    - Most inconsistent tasks (high variance across LOO pairs — best TTT candidates)
+    - Most consistent failures (low variance, always wrong — systematic errors)
+    """
+    SEVERITY_ORDER = ["perfect", "close", "partial", "far", "total"]
+
+    # ── Severity counts ───────────────────────────────────────────────────────
+    sev_counts: dict[str, int] = {s: 0 for s in SEVERITY_ORDER}
+    for r in results:
+        sev_counts[r["severity"]] += 1
+    n = len(results)
+
+    print(f"\n{'=' * 60}")
+    print(f" ERROR ANALYSIS: {mode.upper()}")
+    print(f"{'=' * 60}")
+    print(f"\n{'Severity':<10} {'Cell-acc range':<18} {'Tasks':>6}  {'%':>5}")
+    print("-" * 45)
+    ranges = {
+        "perfect": "100%",
+        "close":   "90–99%",
+        "partial": "50–89%",
+        "far":     "1–49%",
+        "total":   "0%",
+    }
+    for s in SEVERITY_ORDER:
+        c = sev_counts[s]
+        print(f"  {s:<8} {ranges[s]:<18} {c:>6}  {100*c/n:>4.0f}%")
+
+    # ── Bottom 20 by cell accuracy ────────────────────────────────────────────
+    bottom = sorted(results, key=lambda r: r["cell_acc"])[:20]
+    print(f"\nBottom 20 tasks (worst cell accuracy):")
+    print(f"  {'Task ID':<16} {'CellAcc':>7}  {'Exact':>7}  {'Sev':<8}  {'Output':>8}  {'AccStd':>6}")
+    print(f"  {'-'*16} {'-'*7}  {'-'*7}  {'-'*8}  {'-'*8}  {'-'*6}")
+    for r in bottom:
+        out_size = f"{r.get('output_h','?')}×{r.get('output_w','?')}"
+        print(f"  {r['task_id']:<16} {r['cell_acc']:>7.3f}  "
+              f"{r['n_exact']:>2}/{r['n_pairs']:<4}  {r['severity']:<8}  "
+              f"{out_size:>8}  {r.get('cell_acc_std', 0.0):>6.3f}")
+
+    # ── Most inconsistent (high std, < perfect) — best TTT candidates ─────────
+    improvable = [r for r in results if r["cell_acc"] < 1.0]
+    inconsistent = sorted(improvable,
+                          key=lambda r: r.get("cell_acc_std", 0.0),
+                          reverse=True)[:10]
+    print(f"\nTop 10 most inconsistent tasks (sometimes right — good TTT candidates):")
+    print(f"  {'Task ID':<16} {'CellAcc':>7}  {'AccStd':>6}  {'Sev':<8}")
+    print(f"  {'-'*16} {'-'*7}  {'-'*6}  {'-'*8}")
+    for r in inconsistent:
+        print(f"  {r['task_id']:<16} {r['cell_acc']:>7.3f}  "
+              f"{r.get('cell_acc_std', 0.0):>6.3f}  {r['severity']:<8}")
+
+    # ── Most consistent failures (low std, always wrong — systematic errors) ───
+    systematic = [r for r in improvable
+                  if r.get("cell_acc_std", 1.0) < 0.05 and r["cell_acc"] < 0.5]
+    systematic = sorted(systematic, key=lambda r: r["cell_acc"])[:10]
+    if systematic:
+        print(f"\nTop 10 most consistent failures (always wrong — systematic errors):")
+        print(f"  {'Task ID':<16} {'CellAcc':>7}  {'AccStd':>6}  {'AvgWrong':>8}")
+        print(f"  {'-'*16} {'-'*7}  {'-'*6}  {'-'*8}")
+        for r in systematic:
+            print(f"  {r['task_id']:<16} {r['cell_acc']:>7.3f}  "
+                  f"{r.get('cell_acc_std', 0.0):>6.3f}  "
+                  f"{r.get('mean_n_wrong', 0.0):>8.1f}")
+
+    # ── Save JSON ─────────────────────────────────────────────────────────────
+    mean_ca = float(np.mean([r["cell_acc"]    for r in results]))
+    mean_em = float(np.mean([r["exact_match"] for r in results]))
+    n_all   = sum(1 for r in results if r["n_exact"] == r["n_pairs"])
+
+    payload = {
+        "meta": {
+            "checkpoint":  str(ckpt_path),
+            "mode":        mode,
+            "n_tasks":     n,
+            "timestamp":   datetime.datetime.now().isoformat(timespec="seconds"),
+        },
+        "summary": {
+            "mean_cell_acc":        mean_ca,
+            "mean_exact_match":     mean_em,
+            "n_tasks_all_exact":    n_all,
+            "severity_counts":      sev_counts,
+            "severity_pct":         {s: round(100 * c / n, 1)
+                                     for s, c in sev_counts.items()},
+        },
+        # Tasks sorted worst → best so the most interesting ones are at the top
+        "tasks": sorted(results, key=lambda r: r["cell_acc"]),
+    }
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2))
+    print(f"\nSaved: {out_path}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -414,9 +531,11 @@ def evaluate_task(
     ttt_batch_size: int = 8,
     ttt_eval_every: int = 20,
     n_d4:           int = 8,
+    analyze:        bool = False,
 ) -> dict:
     train = task["train"]
     accs, exacts = [], []
+    pair_details: list[dict] = []
 
     for hi in range(len(train)):
         ctx_raw = [p for i, p in enumerate(train) if i != hi]
@@ -445,13 +564,47 @@ def evaluate_task(
         if verbose:
             print(f"    [{hi}] cell_acc={ca:.3f}  exact={'YES' if em else 'no'}")
 
-    return {
+        if analyze:
+            wrong_mask = pred != target
+            n_wrong    = int(wrong_mask.sum())
+            # Colour confusion for wrong cells: list of [true_colour, pred_colour]
+            errors = []
+            if n_wrong:
+                true_wrong = target[wrong_mask].tolist()
+                pred_wrong = pred[wrong_mask].tolist()
+                errors = [[t, p] for t, p in zip(true_wrong, pred_wrong)]
+            pair_details.append({
+                "pair_idx": hi,
+                "cell_acc": round(ca, 4),
+                "exact":    em,
+                "n_wrong":  n_wrong,
+                "n_cells":  int(H * W),
+                "output_h": H,
+                "output_w": W,
+                "errors":   errors,
+            })
+
+    mean_ca = float(np.mean(accs))
+    result  = {
         "task_id":     task["task_id"],
-        "cell_acc":    float(np.mean(accs)),
+        "cell_acc":    mean_ca,
         "exact_match": float(np.mean([int(e) for e in exacts])),
         "n_pairs":     len(train),
         "n_exact":     sum(exacts),
     }
+
+    if analyze:
+        first = pair_details[0] if pair_details else {}
+        result.update({
+            "severity":     _severity(mean_ca),
+            "cell_acc_std": float(np.std(accs)),
+            "mean_n_wrong": float(np.mean([p["n_wrong"] for p in pair_details])),
+            "output_h":     first.get("output_h", 0),
+            "output_w":     first.get("output_w", 0),
+            "pairs":        pair_details,
+        })
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +638,10 @@ def main():
                     help="Override task IDs (default: read from checkpoint)")
     ap.add_argument("--verbose",    action="store_true",
                     help="Print per-pair breakdown")
+    ap.add_argument("--analyze",    action="store_true",
+                    help="Collect per-pair error detail and print a ranked analysis report")
+    ap.add_argument("--output-file", default=None,
+                    help="Where to save the JSON analysis (default: results/error_analysis_{mode}_{ckpt_stem}.json)")
     ap.add_argument("--seed",       type=int,   default=42)
     args = ap.parse_args()
 
@@ -538,6 +695,7 @@ def main():
                 args.n_perms, args.ttt_steps, args.ttt_lr,
                 device, rng, args.k_context, args.verbose,
                 args.ttt_batch_size, args.ttt_eval_every, args.n_d4,
+                analyze=args.analyze,
             )
             results.append(r)
             print(f"  {r['task_id']}  "
@@ -556,6 +714,15 @@ def main():
         print(f"  Time: {elapsed:.0f}s\n")
         summary[mode] = {"cell_acc": mean_ca, "exact_match": mean_em,
                          "n_all_exact": n_all_em}
+
+        if args.analyze:
+            ckpt_stem = Path(args.checkpoint).stem
+            if args.output_file:
+                out_path = Path(args.output_file)
+            else:
+                out_name = f"error_analysis_{mode}_{ckpt_stem}.json"
+                out_path = PROJECT_ROOT / "results" / out_name
+            save_analysis(results, mode, args.checkpoint, out_path)
 
     if len(modes) > 1:
         print("=" * 60)

@@ -46,6 +46,46 @@ DATA_DIR     = PROJECT_ROOT / "data" / "training"
 
 
 # ---------------------------------------------------------------------------
+# Rule-based solver dispatcher
+# ---------------------------------------------------------------------------
+
+def _load_rule_solvers():
+    """Import rule-based solvers lazily (so evaluate.py works without them)."""
+    try:
+        from src.solvers.geometric   import solve_geometric
+        from src.solvers.flood_fill  import solve_flood_fill
+        from src.solvers.logical_ops import solve_logical_op
+        from src.solvers.tiling      import solve_tile_fill, solve_tile_compress
+        return [solve_geometric, solve_flood_fill, solve_logical_op,
+                solve_tile_fill, solve_tile_compress]
+    except ImportError as e:
+        print(f"WARNING: rule-based solvers not available ({e}) — --compare-rule-based skipped")
+        return []
+
+_RULE_SOLVERS = None   # loaded on first use
+
+
+def try_rule_based(task: dict) -> np.ndarray | None:
+    """Try each rule-based solver in turn; return first non-None prediction.
+
+    Solvers detect their own applicability from the training pairs.
+    Returns a uint8 numpy array (test output prediction) or None if no solver fires.
+    """
+    global _RULE_SOLVERS
+    if _RULE_SOLVERS is None:
+        _RULE_SOLVERS = _load_rule_solvers()
+
+    for solver in _RULE_SOLVERS:
+        try:
+            pred = solver(task)
+            if pred is not None:
+                return np.array(pred, dtype=np.uint8)
+        except Exception:
+            pass   # solver raised — treat as non-applicable
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Checkpoint loading
 # ---------------------------------------------------------------------------
 
@@ -190,6 +230,44 @@ def save_analysis(
             print(f"  {r['task_id']:<16} {r['cell_acc']:>7.3f}  "
                   f"{r.get('cell_acc_std', 0.0):>6.3f}  "
                   f"{r.get('mean_n_wrong', 0.0):>8.1f}")
+
+    # ── Rule-based vs neural comparison (test pairs) ─────────────────────────
+    rb_results = [r for r in results if "rule_cmp" in r]
+    if rb_results:
+        fired      = [r for r in rb_results if r["rule_cmp"]["rule_fires"]]
+        n_fired    = len(fired)
+        n_rb_exact = sum(1 for r in fired if r["rule_cmp"]["rule_test_exact"])
+        n_nn_exact = sum(1 for r in fired if r["rule_cmp"]["neural_test_exact"])
+        n_agree    = sum(1 for r in fired if r["rule_cmp"]["agree"])
+        n_rb_only  = sum(1 for r in fired
+                         if r["rule_cmp"]["rule_test_exact"]
+                         and not r["rule_cmp"]["neural_test_exact"])
+        n_nn_only  = sum(1 for r in fired
+                         if r["rule_cmp"]["neural_test_exact"]
+                         and not r["rule_cmp"]["rule_test_exact"])
+        n_both     = sum(1 for r in fired
+                         if r["rule_cmp"]["rule_test_exact"]
+                         and r["rule_cmp"]["neural_test_exact"])
+
+        print(f"\nRule-based vs neural (on actual test pairs):")
+        print(f"  Rule-based fired on {n_fired}/{len(rb_results)} tasks")
+        if n_fired:
+            print(f"  Agreement (predictions match): {n_agree}/{n_fired}")
+            print(f"  Both exact:           {n_both:>4}")
+            print(f"  Rule only exact:      {n_rb_only:>4}  ← rule-based adds value")
+            print(f"  Neural only exact:    {n_nn_only:>4}  ← rule-based hurts")
+            print(f"  Neither exact:        {n_fired - n_both - n_rb_only - n_nn_only:>4}")
+
+            if n_rb_only > 0:
+                print(f"\n  Tasks where rule-based is correct but neural is not:")
+                for r in fired:
+                    if r["rule_cmp"]["rule_test_exact"] and not r["rule_cmp"]["neural_test_exact"]:
+                        print(f"    {r['task_id']}  neural_acc={r['rule_cmp']['neural_test_acc']:.3f}")
+            if n_nn_only > 0:
+                print(f"\n  Tasks where neural is correct but rule-based is not:")
+                for r in fired:
+                    if r["rule_cmp"]["neural_test_exact"] and not r["rule_cmp"]["rule_test_exact"]:
+                        print(f"    {r['task_id']}  rule_acc={r['rule_cmp']['rule_test_acc']:.3f}")
 
     # ── Save JSON ─────────────────────────────────────────────────────────────
     mean_ca = float(np.mean([r["cell_acc"]    for r in results]))
@@ -517,21 +595,22 @@ def ttt_decode(
 # ---------------------------------------------------------------------------
 
 def evaluate_task(
-    task:           dict,
-    model:          ArcTransformer,
-    tok:            ArcTokenizer,
-    mode:           str,
-    n_perms:        int,
-    ttt_steps:      int,
-    ttt_lr:         float,
-    device:         torch.device,
-    rng:            np.random.Generator,
-    k_ctx:          int,
-    verbose:        bool,
-    ttt_batch_size: int = 8,
-    ttt_eval_every: int = 20,
-    n_d4:           int = 8,
-    analyze:        bool = False,
+    task:                dict,
+    model:               ArcTransformer,
+    tok:                 ArcTokenizer,
+    mode:                str,
+    n_perms:             int,
+    ttt_steps:           int,
+    ttt_lr:              float,
+    device:              torch.device,
+    rng:                 np.random.Generator,
+    k_ctx:               int,
+    verbose:             bool,
+    ttt_batch_size:      int  = 8,
+    ttt_eval_every:      int  = 20,
+    n_d4:                int  = 8,
+    analyze:             bool = False,
+    compare_rule_based:  bool = False,
 ) -> dict:
     train = task["train"]
     accs, exacts = [], []
@@ -604,6 +683,65 @@ def evaluate_task(
             "pairs":        pair_details,
         })
 
+    # ── Test-pair comparison: neural (greedy) vs rule-based solver ────────────
+    # Both methods are run on the actual test pair using all training pairs as
+    # context.  This is independent of the LOO evaluation above and gives a
+    # direct head-to-head on genuinely unseen data.
+    if compare_rule_based:
+        test_pairs = task.get("test", [])
+        ctx_all    = [(np.array(p["input"],  dtype=np.uint8),
+                       np.array(p["output"], dtype=np.uint8))
+                      for p in train[:k_ctx]]
+        rule_pred  = try_rule_based(task)   # None if no solver fires
+
+        neural_test_accs:   list[float] = []
+        neural_test_exacts: list[bool]  = []
+        rule_test_accs:     list[float] = []
+        rule_test_exacts:   list[bool]  = []
+        agreements:         list[bool]  = []
+
+        for tp in test_pairs:
+            if "output" not in tp:
+                continue
+            test_in = np.array(tp["input"],  dtype=np.uint8)
+            target  = np.array(tp["output"], dtype=np.uint8)
+            H, W    = target.shape
+
+            # Neural greedy on actual test pair
+            neural_pred = greedy_decode(model, tok, ctx_all, test_in, H, W, device)
+            n_ca = float((neural_pred == target).mean())
+            n_em = bool(np.array_equal(neural_pred, target))
+            neural_test_accs.append(n_ca)
+            neural_test_exacts.append(n_em)
+
+            # Rule-based (already computed for whole task)
+            if rule_pred is not None and rule_pred.shape == target.shape:
+                r_ca = float((rule_pred == target).mean())
+                r_em = bool(np.array_equal(rule_pred, target))
+                rule_test_accs.append(r_ca)
+                rule_test_exacts.append(r_em)
+                agreements.append(bool(np.array_equal(neural_pred, rule_pred)))
+
+        cmp: dict = {
+            "neural_test_acc":   float(np.mean(neural_test_accs))   if neural_test_accs   else None,
+            "neural_test_exact": bool(all(neural_test_exacts))       if neural_test_exacts else None,
+            "rule_fires":        rule_pred is not None,
+            "rule_test_acc":     float(np.mean(rule_test_accs))      if rule_test_accs     else None,
+            "rule_test_exact":   bool(all(rule_test_exacts))         if rule_test_exacts   else None,
+            "agree":             bool(all(agreements))               if agreements         else None,
+        }
+
+        if verbose and rule_pred is not None:
+            tag = "AGREE" if cmp["agree"] else "DISAGREE"
+            print(f"    [test] neural={cmp['neural_test_acc']:.3f}{'✓' if cmp['neural_test_exact'] else '✗'}"
+                  f"  rule={cmp['rule_test_acc']:.3f}{'✓' if cmp['rule_test_exact'] else '✗'}"
+                  f"  {tag}")
+        elif verbose:
+            print(f"    [test] neural={cmp['neural_test_acc']:.3f}{'✓' if cmp['neural_test_exact'] else '✗'}"
+                  f"  rule=n/a")
+
+        result["rule_cmp"] = cmp
+
     return result
 
 
@@ -640,6 +778,9 @@ def main():
                     help="Print per-pair breakdown")
     ap.add_argument("--analyze",    action="store_true",
                     help="Collect per-pair error detail and print a ranked analysis report")
+    ap.add_argument("--compare-rule-based", action="store_true",
+                    help="For each task, also run rule-based solvers on the actual test pair "
+                         "and compare with the neural model prediction")
     ap.add_argument("--output-file", default=None,
                     help="Where to save the JSON analysis (default: results/error_analysis_{mode}_{ckpt_stem}.json)")
     ap.add_argument("--seed",       type=int,   default=42)
@@ -696,6 +837,7 @@ def main():
                 device, rng, args.k_context, args.verbose,
                 args.ttt_batch_size, args.ttt_eval_every, args.n_d4,
                 analyze=args.analyze,
+                compare_rule_based=args.compare_rule_based,
             )
             results.append(r)
             print(f"  {r['task_id']}  "

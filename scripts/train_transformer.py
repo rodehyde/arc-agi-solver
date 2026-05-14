@@ -904,12 +904,12 @@ def main():
                     model, tokenizer, args.val_arc_task_ids, device, args.k_context
                 )
                 arc_str = f"  |  test acc={arc_acc:.3f} exact={arc_exact:.3f}"
-                improved = arc_exact > best_val_loss   # best_val_loss reused as best_test_exact
+                improved = arc_acc > best_val_loss   # checkpoint on test cell_acc (smoother than exact)
             else:
                 improved = mean_v_loss < best_val_loss
 
             if improved:
-                best_val_loss = arc_exact if args.val_arc_task_ids else mean_v_loss
+                best_val_loss = arc_acc if args.val_arc_task_ids else mean_v_loss
                 no_improve = 0
                 p_best = CKPT_DIR / f"transformer_c{run_tag}_best.pt"
                 torch.save({

@@ -547,17 +547,21 @@ def _arc_greedy_decode(
         return model.generate(prefix, pad_mask, H, W, test_out_gnum)
 
 
-def validate_on_arc(
+def validate_on_arc_test(
     model: ArcTransformer,
     tok: ArcTokenizer,
     val_task_ids: list[str],
     device: torch.device,
     k_context: int,
 ) -> tuple[float, float]:
-    """Leave-one-out evaluation on original ARC training pairs.
+    """Evaluate on the actual held-out test pair for each task.
 
-    For each task: for each pair i, use the other pairs (up to k_context) as
-    context and greedily decode the output.  Returns (mean_cell_acc, mean_exact).
+    Uses all training pairs (up to k_context) as context and greedily decodes
+    the test output, comparing against the known test output.  This is the
+    cleanest validation signal: genuinely unseen data, one query per task,
+    and directly mirrors competition conditions.
+
+    Returns (mean_cell_acc, mean_exact_match) over all tasks.
     """
     model.eval()
     all_accs, all_exacts = [], []
@@ -566,21 +570,23 @@ def validate_on_arc(
         path = ARC_TRAINING_DIR / f"{tid}.json"
         if not path.exists():
             continue
-        task  = json.loads(path.read_text())
-        pairs = task["train"]
-        n = len(pairs)
+        task        = json.loads(path.read_text())
+        train_pairs = task["train"]
+        test_pairs  = task.get("test", [])
+        if not test_pairs:
+            continue
 
-        for hi in range(n):
-            ctx_raw = [p for i, p in enumerate(pairs) if i != hi]
-            tp      = pairs[hi]
+        ctx = [(np.array(p["input"],  dtype=np.uint8),
+                np.array(p["output"], dtype=np.uint8))
+               for p in train_pairs[:k_context]]
+
+        for tp in test_pairs:
+            if "output" not in tp:
+                continue   # competition tasks with no known answer — skip
             test_in = np.array(tp["input"],  dtype=np.uint8)
             target  = np.array(tp["output"], dtype=np.uint8)
             H, W    = target.shape
-            ctx     = [(np.array(p["input"],  dtype=np.uint8),
-                        np.array(p["output"], dtype=np.uint8))
-                       for p in ctx_raw[:k_context]]
-
-            pred = _arc_greedy_decode(model, tok, ctx, test_in, H, W, device)
+            pred    = _arc_greedy_decode(model, tok, ctx, test_in, H, W, device)
             all_accs.append(float((pred == target).mean()))
             all_exacts.append(float(np.array_equal(pred, target)))
 
@@ -727,13 +733,13 @@ def main():
         )
         print(f"  Example sequence length (task 0, k={k_eff}): {len(sample_feats)} tokens")
 
-        # ARC mode: always use ARC-exact-match as checkpoint criterion.
+        # ARC mode: always use test-pair exact match as checkpoint criterion.
         # Validate only on original ARC task IDs (not BARC) so the metric is
         # comparable across runs with and without BARC.
         if args.val_arc_task_ids is None:
             arc_only_ids = task_ids[:n_arc_tasks]   # original ARC tasks only
             args.val_arc_task_ids = arc_only_ids
-            print(f"  ARC mode: using {len(arc_only_ids)} ARC task(s) for LOO validation")
+            print(f"  ARC mode: using {len(arc_only_ids)} ARC task(s) for test-pair validation")
     else:
         print("  Loading RE-ARC examples...", end=" ", flush=True)
         task_data = [load_task_examples(tid) for tid in task_ids]
@@ -891,14 +897,14 @@ def main():
 
             mean_v_loss = v_loss / max(n_vb, 1)
 
-            # ARC-based validation: leave-one-out on original training pairs
+            # Test-pair validation: use actual held-out test pairs
             arc_str = ""
             if args.val_arc_task_ids:
-                arc_acc, arc_exact = validate_on_arc(
+                arc_acc, arc_exact = validate_on_arc_test(
                     model, tokenizer, args.val_arc_task_ids, device, args.k_context
                 )
-                arc_str = f"  |  arc acc={arc_acc:.3f} exact={arc_exact:.3f}"
-                improved = arc_exact > best_val_loss   # best_val_loss reused as best_arc_exact
+                arc_str = f"  |  test acc={arc_acc:.3f} exact={arc_exact:.3f}"
+                improved = arc_exact > best_val_loss   # best_val_loss reused as best_test_exact
             else:
                 improved = mean_v_loss < best_val_loss
 

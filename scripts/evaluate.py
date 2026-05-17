@@ -584,7 +584,7 @@ def ttt_decode(
                         k_ctx, batch_size, eval_every)
     ctx = [(np.array(p["input"],  dtype=np.uint8),
             np.array(p["output"], dtype=np.uint8))
-           for p in ctx_raw]
+           for p in ctx_raw[:k_ctx]]
     if n_perms > 1:
         return tta_decode(ttt, tok, ctx, test_in, H, W, n_perms, device, rng, n_d4)
     return greedy_decode(ttt, tok, ctx, test_in, H, W, device)
@@ -624,7 +624,7 @@ def evaluate_task(
         H, W    = target.shape
         ctx     = [(np.array(p["input"],  dtype=np.uint8),
                     np.array(p["output"], dtype=np.uint8))
-                   for p in ctx_raw]
+                   for p in ctx_raw[:k_ctx]]
 
         if mode == "greedy":
             pred = greedy_decode(model, tok, ctx, test_in, H, W, device)

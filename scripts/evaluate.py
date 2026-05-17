@@ -269,6 +269,22 @@ def save_analysis(
                     if r["rule_cmp"]["neural_test_exact"] and not r["rule_cmp"]["rule_test_exact"]:
                         print(f"    {r['task_id']}  rule_acc={r['rule_cmp']['rule_test_acc']:.3f}")
 
+        # ── Dispatcher score (rule if fires, neural fallback) ─────────────────
+        disp_results = [r for r in rb_results if r["rule_cmp"].get("dispatcher_test_exact") is not None]
+        if disp_results:
+            n_disp_exact  = sum(1 for r in disp_results if r["rule_cmp"]["dispatcher_test_exact"])
+            n_neural_only = sum(1 for r in disp_results if not r["rule_cmp"]["rule_fires"])
+            n_disp_rule   = sum(1 for r in disp_results if r["rule_cmp"]["rule_fires"]
+                                and r["rule_cmp"]["dispatcher_test_exact"])
+            n_disp_neural = sum(1 for r in disp_results if not r["rule_cmp"]["rule_fires"]
+                                and r["rule_cmp"]["dispatcher_test_exact"])
+            n_total       = len(rb_results)
+            print(f"\nDispatcher (rule-based first, neural fallback):")
+            print(f"  Tasks solved: {n_disp_exact}/{n_total}  "
+                  f"({100*n_disp_exact/n_total:.1f}%)")
+            print(f"    via rule-based:  {n_disp_rule}/{n_fired if n_fired else 0}")
+            print(f"    via neural:      {n_disp_neural}/{n_neural_only}")
+
     # ── Save JSON ─────────────────────────────────────────────────────────────
     mean_ca = float(np.mean([r["cell_acc"]    for r in results]))
     mean_em = float(np.mean([r["exact_match"] for r in results]))
@@ -722,13 +738,23 @@ def evaluate_task(
                 rule_test_exacts.append(r_em)
                 agreements.append(bool(np.array_equal(neural_pred, rule_pred)))
 
+        # Dispatcher: rule-based if it fires, neural otherwise
+        if rule_pred is not None and rule_test_accs:
+            disp_acc   = float(np.mean(rule_test_accs))
+            disp_exact = bool(all(rule_test_exacts))
+        else:
+            disp_acc   = float(np.mean(neural_test_accs))   if neural_test_accs else None
+            disp_exact = bool(all(neural_test_exacts))       if neural_test_exacts else None
+
         cmp: dict = {
-            "neural_test_acc":   float(np.mean(neural_test_accs))   if neural_test_accs   else None,
-            "neural_test_exact": bool(all(neural_test_exacts))       if neural_test_exacts else None,
-            "rule_fires":        rule_pred is not None,
-            "rule_test_acc":     float(np.mean(rule_test_accs))      if rule_test_accs     else None,
-            "rule_test_exact":   bool(all(rule_test_exacts))         if rule_test_exacts   else None,
-            "agree":             bool(all(agreements))               if agreements         else None,
+            "neural_test_acc":      float(np.mean(neural_test_accs))   if neural_test_accs   else None,
+            "neural_test_exact":    bool(all(neural_test_exacts))       if neural_test_exacts else None,
+            "rule_fires":           rule_pred is not None,
+            "rule_test_acc":        float(np.mean(rule_test_accs))      if rule_test_accs     else None,
+            "rule_test_exact":      bool(all(rule_test_exacts))         if rule_test_exacts   else None,
+            "agree":                bool(all(agreements))               if agreements         else None,
+            "dispatcher_test_acc":  disp_acc,
+            "dispatcher_test_exact": disp_exact,
         }
 
         if verbose and rule_pred is not None:

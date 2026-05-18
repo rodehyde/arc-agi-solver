@@ -461,17 +461,19 @@ def ttt_fine_tune(
     rng:         np.random.Generator,
     k_ctx:       int = 3,
     batch_size:  int = 8,
-    eval_every:  int = 20,
+    eval_every:  int = 5,
+    patience:    int = 5,
+    verbose:     bool = False,
 ) -> ArcTransformer:
     """Return a fine-tuned *copy* of model (the original model is not modified).
 
-    Improvements over naive TTT:
     - Batch size > 1: each step trains on `batch_size` differently-augmented
       versions of the same LOO configuration, giving much richer gradient signal.
     - Cosine LR decay: starts at `lr`, tapers to lr/100 by the final step.
     - Save-best: every `eval_every` steps, evaluate clean LOO cell accuracy and
-      keep the model state that achieved the highest score. Guards against the
-      overfitting cliff that occurs with few training pairs.
+      keep the model state with the highest score.
+    - Early stopping: if LOO hasn't improved for `patience` consecutive eval
+      cycles, stop early. Guards against the overfitting cliff.
     """
     ttt = copy.deepcopy(model)
     ttt.train()
@@ -482,8 +484,10 @@ def ttt_fine_tune(
     n         = len(train_pairs)
     can_eval  = (n >= 2)   # need ≥2 pairs for meaningful LOO eval
 
-    best_score = -1.0
-    best_state = copy.deepcopy(ttt.state_dict())
+    best_score    = -1.0
+    best_state    = copy.deepcopy(ttt.state_dict())
+    best_step     = 0
+    patience_left = patience
 
     for step in range(n_steps):
         # Pick one LOO configuration for this step
@@ -564,13 +568,26 @@ def ttt_fine_tune(
         opt.step()
         scheduler.step()
 
-        # Save-best: check LOO accuracy periodically
+        # Save-best + early stopping: check LOO accuracy periodically
         if can_eval and (step + 1) % eval_every == 0:
             ttt.eval()
             score = _ttt_loo_score(ttt, tok, train_pairs, k_ctx, device)
             if score > best_score:
-                best_score = score
-                best_state = copy.deepcopy(ttt.state_dict())
+                best_score    = score
+                best_state    = copy.deepcopy(ttt.state_dict())
+                best_step     = step + 1
+                patience_left = patience
+                if verbose:
+                    print(f"      step {step+1:>4}/{n_steps}: LOO={score:.4f} ✓ (new best)")
+            else:
+                patience_left -= 1
+                if verbose:
+                    print(f"      step {step+1:>4}/{n_steps}: LOO={score:.4f}  "
+                          f"best={best_score:.4f}@{best_step}  patience={patience_left}/{patience}")
+                if patience_left <= 0:
+                    if verbose:
+                        print(f"      early stop at step {step+1} — best was step {best_step}")
+                    break
             ttt.train()
 
     # Restore the best observed state
@@ -592,12 +609,14 @@ def ttt_decode(
     rng:         np.random.Generator,
     k_ctx:       int = 3,
     batch_size:  int = 8,
-    eval_every:  int = 20,
+    eval_every:  int = 5,
     n_d4:        int = 8,
+    patience:    int = 5,
+    verbose:     bool = False,
 ) -> np.ndarray:
     """Fine-tune on available context pairs, then run TTA for the prediction."""
     ttt = ttt_fine_tune(model, tok, ctx_raw, n_steps, lr, device, rng,
-                        k_ctx, batch_size, eval_every)
+                        k_ctx, batch_size, eval_every, patience, verbose)
     ctx = [(np.array(p["input"],  dtype=np.uint8),
             np.array(p["output"], dtype=np.uint8))
            for p in ctx_raw[:k_ctx]]
@@ -623,10 +642,11 @@ def evaluate_task(
     k_ctx:               int,
     verbose:             bool,
     ttt_batch_size:      int  = 8,
-    ttt_eval_every:      int  = 20,
+    ttt_eval_every:      int  = 5,
     n_d4:                int  = 8,
     analyze:             bool = False,
     compare_rule_based:  bool = False,
+    ttt_patience:        int  = 5,
 ) -> dict:
     train = task["train"]
     accs, exacts = [], []
@@ -649,7 +669,8 @@ def evaluate_task(
         else:   # ttt
             pred = ttt_decode(model, tok, ctx_raw, test_in, H, W,
                               ttt_steps, n_perms, ttt_lr, device, rng,
-                              k_ctx, ttt_batch_size, ttt_eval_every, n_d4)
+                              k_ctx, ttt_batch_size, ttt_eval_every, n_d4,
+                              patience=ttt_patience, verbose=verbose)
 
         ca = float((pred == target).mean())
         em = bool(np.array_equal(pred, target))
@@ -792,6 +813,7 @@ def _run_selective_ttt(tasks, model, tok, args, device, rng):
         ttt_batch_size=args.ttt_batch_size, ttt_eval_every=args.ttt_eval_every,
         n_d4=args.n_d4, analyze=args.analyze,
         compare_rule_based=args.compare_rule_based,
+        ttt_patience=args.ttt_patience,
     )
 
     # ── Phase 1: TTA on all tasks ─────────────────────────────────────────
@@ -889,8 +911,10 @@ def main():
                     help="Learning rate for TTT fine-tuning (default: 1e-4)")
     ap.add_argument("--ttt-batch-size", type=int,   default=8,
                     help="Augmented sequences per TTT step (default: 8)")
-    ap.add_argument("--ttt-eval-every", type=int,   default=20,
-                    help="Steps between save-best LOO evaluations (default: 20)")
+    ap.add_argument("--ttt-eval-every", type=int,   default=5,
+                    help="Steps between save-best LOO evaluations (default: 5)")
+    ap.add_argument("--ttt-patience",   type=int,   default=5,
+                    help="Early-stop TTT after this many eval cycles with no improvement (default: 5)")
     ap.add_argument("--ttt-threshold", type=float, default=1.0,
                     help="selective_ttt: run TTT on tasks where TTA cell_acc < this value "
                          "(default: 1.0 — TTT on all tasks TTA doesn't get perfect)")
@@ -966,6 +990,7 @@ def main():
                 args.ttt_batch_size, args.ttt_eval_every, args.n_d4,
                 analyze=args.analyze,
                 compare_rule_based=args.compare_rule_based,
+                ttt_patience=args.ttt_patience,
             )
             results.append(r)
             print(f"  {r['task_id']}  "

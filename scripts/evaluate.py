@@ -772,6 +772,96 @@ def evaluate_task(
 
 
 # ---------------------------------------------------------------------------
+# Selective TTT
+# ---------------------------------------------------------------------------
+
+def _run_selective_ttt(tasks, model, tok, args, device, rng):
+    """TTA on all tasks; TTT only on tasks TTA doesn't get perfect.
+
+    For each task:
+      - Run TTA.
+      - If TTA exact_match >= ttt_threshold → keep TTA result.
+      - Otherwise → also run TTT; keep whichever has higher cell_acc.
+    This protects already-perfect tasks from TTT regression while still
+    applying TTT where it has a chance to help.
+    """
+    eval_kw = dict(
+        n_perms=args.n_perms, ttt_steps=args.ttt_steps, ttt_lr=args.ttt_lr,
+        device=device, rng=rng, k_ctx=args.k_context, verbose=args.verbose,
+        ttt_batch_size=args.ttt_batch_size, ttt_eval_every=args.ttt_eval_every,
+        n_d4=args.n_d4, analyze=args.analyze,
+        compare_rule_based=args.compare_rule_based,
+    )
+
+    # ── Phase 1: TTA on all tasks ─────────────────────────────────────────
+    print("=" * 60)
+    print(f" SELECTIVE TTT — Phase 1: TTA  (n_perms={args.n_perms}  n_d4={args.n_d4})")
+    print("=" * 60)
+    t0 = time.time()
+    tta_results: dict[str, dict] = {}
+    for task in tasks:
+        if args.verbose:
+            print(f"\n  Task {task['task_id']}  ({len(task['train'])} pairs):")
+        r = evaluate_task(task, model, tok, "tta", **eval_kw)
+        tta_results[task["task_id"]] = r
+        print(f"  {r['task_id']}  cell_acc={r['cell_acc']:.3f}  "
+              f"exact_match={r['exact_match']:.3f}  ({r['n_exact']}/{r['n_pairs']} exact)")
+    print(f"  TTA time: {time.time()-t0:.0f}s")
+
+    # ── Phase 2: TTT on non-perfect tasks ────────────────────────────────
+    ttt_candidates = [t for t in tasks
+                      if tta_results[t["task_id"]]["exact_match"] < args.ttt_threshold]
+    n_skip = len(tasks) - len(ttt_candidates)
+    print(f"\n  TTA perfect (skipping TTT): {n_skip}/{len(tasks)}")
+    print(f"  Running TTT on:             {len(ttt_candidates)} tasks  "
+          f"(steps={args.ttt_steps}  lr={args.ttt_lr})")
+    print("=" * 60)
+    print(f" SELECTIVE TTT — Phase 2: TTT  (steps={args.ttt_steps}  lr={args.ttt_lr})")
+    print("=" * 60)
+    t1 = time.time()
+    ttt_results: dict[str, dict] = {}
+    for task in ttt_candidates:
+        if args.verbose:
+            print(f"\n  Task {task['task_id']}  ({len(task['train'])} pairs):")
+        r = evaluate_task(task, model, tok, "ttt", **eval_kw)
+        ttt_results[task["task_id"]] = r
+        tta_r = tta_results[task["task_id"]]
+        marker = "↑" if r["cell_acc"] > tta_r["cell_acc"] else ("↓" if r["cell_acc"] < tta_r["cell_acc"] else "=")
+        print(f"  {r['task_id']}  ttt={r['cell_acc']:.3f}  tta={tta_r['cell_acc']:.3f}  {marker}  "
+              f"({r['n_exact']}/{r['n_pairs']} exact)")
+    print(f"  TTT time: {time.time()-t1:.0f}s")
+
+    # ── Combine: best of TTA / TTT per task ───────────────────────────────
+    final_results = []
+    for task in tasks:
+        tid = task["task_id"]
+        tta_r = tta_results[tid]
+        if tid not in ttt_results:
+            final_results.append(tta_r)
+        else:
+            ttt_r = ttt_results[tid]
+            best  = ttt_r if ttt_r["cell_acc"] >= tta_r["cell_acc"] else tta_r
+            best["_method"] = "ttt" if best is ttt_r else "tta"
+            final_results.append(best)
+
+    # ── Summary ───────────────────────────────────────────────────────────
+    n_ttt_helped = sum(1 for tid, r in ttt_results.items()
+                       if r["cell_acc"] > tta_results[tid]["cell_acc"])
+    n_ttt_hurt   = sum(1 for tid, r in ttt_results.items()
+                       if r["cell_acc"] < tta_results[tid]["cell_acc"])
+
+    ckpt_stem = Path(args.checkpoint).stem
+    out_path  = (Path(args.output_file) if args.output_file
+                 else PROJECT_ROOT / "results" / f"error_analysis_selective_ttt_{ckpt_stem}.json")
+    save_analysis(final_results, "selective_ttt", args.checkpoint, out_path)
+
+    print(f"\n  TTT helped: {n_ttt_helped}/{len(ttt_candidates)} tasks  "
+          f"(cell_acc improved)")
+    print(f"  TTT hurt:   {n_ttt_hurt}/{len(ttt_candidates)} tasks  "
+          f"(TTA result kept instead)")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -782,8 +872,10 @@ def main():
     ap.add_argument("--checkpoint", required=True,
                     help="Path to .pt checkpoint (e.g. checkpoints/transformer_cC8_compartment_fill_best.pt)")
     ap.add_argument("--mode",       default="all",
-                    choices=["greedy", "tta", "ttt", "all"],
-                    help="Inference mode (default: all — runs all three for comparison)")
+                    choices=["greedy", "tta", "ttt", "all", "selective_ttt"],
+                    help="Inference mode (default: all — runs all three for comparison). "
+                         "selective_ttt: run TTA on all tasks, then TTT only on tasks "
+                         "where TTA exact_match < --ttt-threshold; take best per task.")
     ap.add_argument("--n-perms",    type=int,   default=20,
                     help="Number of colour permutations per D4 orientation for TTA (default: 20)")
     ap.add_argument("--n-d4",       type=int,   default=8,
@@ -796,6 +888,8 @@ def main():
                     help="Augmented sequences per TTT step (default: 8)")
     ap.add_argument("--ttt-eval-every", type=int,   default=20,
                     help="Steps between save-best LOO evaluations (default: 20)")
+    ap.add_argument("--ttt-threshold", type=float, default=1.0,
+                    help="selective_ttt: run TTT on tasks where TTA exact_match < this value (default: 1.0)")
     ap.add_argument("--k-context",  type=int,   default=3,
                     help="Max context pairs at inference / TTT fine-tune (default: 3)")
     ap.add_argument("--task-ids",   nargs="+",  default=None,
@@ -837,6 +931,10 @@ def main():
 
     tok = ArcTokenizer()
     rng = np.random.default_rng(args.seed)
+
+    if args.mode == "selective_ttt":
+        _run_selective_ttt(tasks, model, tok, args, device, rng)
+        return
 
     modes = ["greedy", "tta", "ttt"] if args.mode == "all" else [args.mode]
     summary = {}

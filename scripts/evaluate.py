@@ -464,6 +464,7 @@ def ttt_fine_tune(
     eval_every:  int = 5,
     patience:    int = 5,
     verbose:     bool = False,
+    freeze_layers: int = -1,   # freeze first N blocks; -1 = auto (75% of depth)
 ) -> ArcTransformer:
     """Return a fine-tuned *copy* of model (the original model is not modified).
 
@@ -474,10 +475,22 @@ def ttt_fine_tune(
       keep the model state with the highest score.
     - Early stopping: if LOO hasn't improved for `patience` consecutive eval
       cycles, stop early. Guards against the overfitting cliff.
+    - Layer freezing: freeze the first `freeze_layers` transformer blocks so the
+      model can't deeply overfit; only the final blocks + output head adapt.
+      freeze_layers=-1 (default) freezes the first 75% of blocks automatically.
+      freeze_layers=0 trains all layers (old behaviour — tends to overfit).
     """
     ttt = copy.deepcopy(model)
     ttt.train()
-    opt       = torch.optim.AdamW(ttt.parameters(), lr=lr, weight_decay=1e-2)
+    # Freeze early layers — they encode the abstract rule; only late layers adapt
+    n_blocks = len(ttt.blocks)
+    n_freeze = int(n_blocks * 0.75) if freeze_layers < 0 else freeze_layers
+    for i, block in enumerate(ttt.blocks):
+        if i < n_freeze:
+            for p in block.parameters():
+                p.requires_grad = False
+    trainable = [p for p in ttt.parameters() if p.requires_grad]
+    opt       = torch.optim.AdamW(trainable, lr=lr, weight_decay=1e-2)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=n_steps, eta_min=lr * 0.01
     )
@@ -564,7 +577,7 @@ def ttt_fine_tune(
         loss = F.cross_entropy(fl[fm], ft2[fm].long())
         opt.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(ttt.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(trainable, 1.0)
         opt.step()
         scheduler.step()
 
@@ -610,13 +623,15 @@ def ttt_decode(
     k_ctx:       int = 3,
     batch_size:  int = 8,
     eval_every:  int = 5,
-    n_d4:        int = 8,
-    patience:    int = 5,
-    verbose:     bool = False,
+    n_d4:          int = 8,
+    patience:      int = 5,
+    verbose:       bool = False,
+    freeze_layers: int = 9,
 ) -> np.ndarray:
     """Fine-tune on available context pairs, then run TTA for the prediction."""
     ttt = ttt_fine_tune(model, tok, ctx_raw, n_steps, lr, device, rng,
-                        k_ctx, batch_size, eval_every, patience, verbose)
+                        k_ctx, batch_size, eval_every, patience, verbose,
+                        freeze_layers=freeze_layers)
     ctx = [(np.array(p["input"],  dtype=np.uint8),
             np.array(p["output"], dtype=np.uint8))
            for p in ctx_raw[:k_ctx]]
@@ -647,6 +662,7 @@ def evaluate_task(
     analyze:             bool = False,
     compare_rule_based:  bool = False,
     ttt_patience:        int  = 5,
+    ttt_freeze_layers:   int  = 9,
 ) -> dict:
     train = task["train"]
     accs, exacts = [], []
@@ -670,7 +686,8 @@ def evaluate_task(
             pred = ttt_decode(model, tok, ctx_raw, test_in, H, W,
                               ttt_steps, n_perms, ttt_lr, device, rng,
                               k_ctx, ttt_batch_size, ttt_eval_every, n_d4,
-                              patience=ttt_patience, verbose=verbose)
+                              patience=ttt_patience, verbose=verbose,
+                              freeze_layers=ttt_freeze_layers)
 
         ca = float((pred == target).mean())
         em = bool(np.array_equal(pred, target))
@@ -823,6 +840,7 @@ def _run_selective_ttt(tasks, model, tok, args, device, rng):
         n_d4=args.n_d4, analyze=args.analyze,
         compare_rule_based=args.compare_rule_based,
         ttt_patience=args.ttt_patience,
+        ttt_freeze_layers=args.ttt_freeze_layers,
     )
 
     # ── Phase 1: TTA on all tasks (with cache) ───────────────────────────
@@ -953,8 +971,10 @@ def main():
                     help="Augmented sequences per TTT step (default: 8)")
     ap.add_argument("--ttt-eval-every", type=int,   default=5,
                     help="Steps between save-best LOO evaluations (default: 5)")
-    ap.add_argument("--ttt-patience",   type=int,   default=5,
+    ap.add_argument("--ttt-patience",      type=int,   default=5,
                     help="Early-stop TTT after this many eval cycles with no improvement (default: 5)")
+    ap.add_argument("--ttt-freeze-layers", type=int,   default=-1,
+                    help="Freeze first N transformer blocks during TTT (-1=auto/75%%, 0=all trainable)")
     ap.add_argument("--ttt-threshold", type=float, default=1.0,
                     help="selective_ttt: run TTT on tasks where TTA cell_acc < this value "
                          "(default: 1.0 — TTT on all tasks TTA doesn't get perfect)")
@@ -1031,6 +1051,7 @@ def main():
                 analyze=args.analyze,
                 compare_rule_based=args.compare_rule_based,
                 ttt_patience=args.ttt_patience,
+                ttt_freeze_layers=args.ttt_freeze_layers,
             )
             results.append(r)
             print(f"  {r['task_id']}  "

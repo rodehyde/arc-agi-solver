@@ -776,14 +776,15 @@ def evaluate_task(
 # ---------------------------------------------------------------------------
 
 def _run_selective_ttt(tasks, model, tok, args, device, rng):
-    """TTA on all tasks; TTT only on tasks TTA doesn't get perfect.
+    """TTA on all tasks; TTT only on tasks where TTA cell_acc < ttt_threshold.
 
     For each task:
       - Run TTA.
-      - If TTA exact_match >= ttt_threshold → keep TTA result.
-      - Otherwise → also run TTT; keep whichever has higher cell_acc.
-    This protects already-perfect tasks from TTT regression while still
-    applying TTT where it has a chance to help.
+      - If TTA cell_acc >= ttt_threshold → keep TTA result (skip TTT).
+      - Otherwise → also run TTT (with ttt_n_perms permutations); keep whichever
+        has higher cell_acc.
+    This protects already-good tasks from TTT regression and concentrates TTT
+    budget on tasks where it has the most room to help.
     """
     eval_kw = dict(
         n_perms=args.n_perms, ttt_steps=args.ttt_steps, ttt_lr=args.ttt_lr,
@@ -808,9 +809,11 @@ def _run_selective_ttt(tasks, model, tok, args, device, rng):
               f"exact_match={r['exact_match']:.3f}  ({r['n_exact']}/{r['n_pairs']} exact)")
     print(f"  TTA time: {time.time()-t0:.0f}s")
 
-    # ── Phase 2: TTT on non-perfect tasks ────────────────────────────────
+    # ── Phase 2: TTT on tasks below threshold ─────────────────────────────
+    # Threshold is on cell_acc so you can set e.g. 0.90 to skip "close" tasks
+    # and only TTT on partial/far tasks (much faster).
     ttt_candidates = [t for t in tasks
-                      if tta_results[t["task_id"]]["exact_match"] < args.ttt_threshold]
+                      if tta_results[t["task_id"]]["cell_acc"] < args.ttt_threshold]
     n_skip = len(tasks) - len(ttt_candidates)
     print(f"\n  TTA perfect (skipping TTT): {n_skip}/{len(tasks)}")
     print(f"  Running TTT on:             {len(ttt_candidates)} tasks  "
@@ -889,7 +892,8 @@ def main():
     ap.add_argument("--ttt-eval-every", type=int,   default=20,
                     help="Steps between save-best LOO evaluations (default: 20)")
     ap.add_argument("--ttt-threshold", type=float, default=1.0,
-                    help="selective_ttt: run TTT on tasks where TTA exact_match < this value (default: 1.0)")
+                    help="selective_ttt: run TTT on tasks where TTA cell_acc < this value "
+                         "(default: 1.0 — TTT on all tasks TTA doesn't get perfect)")
     ap.add_argument("--k-context",  type=int,   default=3,
                     help="Max context pairs at inference / TTT fine-tune (default: 3)")
     ap.add_argument("--task-ids",   nargs="+",  default=None,

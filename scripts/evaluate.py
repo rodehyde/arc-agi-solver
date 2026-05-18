@@ -796,6 +796,15 @@ def evaluate_task(
 # Selective TTT
 # ---------------------------------------------------------------------------
 
+def _tta_cache_path(ckpt_path: str, task_ids: list[str],
+                    n_perms: int, n_d4: int) -> Path:
+    """Return the path for the TTA results cache file."""
+    import hashlib
+    ids_hash = hashlib.md5(",".join(sorted(task_ids)).encode()).hexdigest()[:8]
+    stem     = Path(ckpt_path).stem
+    return PROJECT_ROOT / "results" / f"tta_cache_{stem}_p{n_perms}_d{n_d4}_{ids_hash}.json"
+
+
 def _run_selective_ttt(tasks, model, tok, args, device, rng):
     """TTA on all tasks; TTT only on tasks where TTA cell_acc < ttt_threshold.
 
@@ -816,20 +825,51 @@ def _run_selective_ttt(tasks, model, tok, args, device, rng):
         ttt_patience=args.ttt_patience,
     )
 
-    # ── Phase 1: TTA on all tasks ─────────────────────────────────────────
-    print("=" * 60)
-    print(f" SELECTIVE TTT — Phase 1: TTA  (n_perms={args.n_perms}  n_d4={args.n_d4})")
-    print("=" * 60)
-    t0 = time.time()
+    # ── Phase 1: TTA on all tasks (with cache) ───────────────────────────
+    task_ids   = [t["task_id"] for t in tasks]
+    cache_path = _tta_cache_path(args.checkpoint, task_ids, args.n_perms, args.n_d4)
     tta_results: dict[str, dict] = {}
-    for task in tasks:
-        if args.verbose:
-            print(f"\n  Task {task['task_id']}  ({len(task['train'])} pairs):")
-        r = evaluate_task(task, model, tok, "tta", **eval_kw)
-        tta_results[task["task_id"]] = r
-        print(f"  {r['task_id']}  cell_acc={r['cell_acc']:.3f}  "
-              f"exact_match={r['exact_match']:.3f}  ({r['n_exact']}/{r['n_pairs']} exact)")
-    print(f"  TTA time: {time.time()-t0:.0f}s")
+
+    if cache_path.exists():
+        print("=" * 60)
+        print(f" SELECTIVE TTT — Phase 1: TTA  (loaded from cache)")
+        print("=" * 60)
+        with open(cache_path) as f:
+            tta_results = json.load(f)
+        # Only keep tasks present in this run (cache may cover a superset)
+        tta_results = {tid: tta_results[tid] for tid in task_ids if tid in tta_results}
+        missing = [tid for tid in task_ids if tid not in tta_results]
+        print(f"  Cached: {len(tta_results)}/{len(task_ids)} tasks  "
+              f"(from {cache_path.name})")
+        if missing:
+            print(f"  Running TTA for {len(missing)} uncached tasks: {missing}")
+            for task in tasks:
+                if task["task_id"] in missing:
+                    r = evaluate_task(task, model, tok, "tta", **eval_kw)
+                    tta_results[task["task_id"]] = r
+                    print(f"  {r['task_id']}  cell_acc={r['cell_acc']:.3f}  "
+                          f"exact_match={r['exact_match']:.3f}  ({r['n_exact']}/{r['n_pairs']} exact)")
+            # Update cache with newly computed tasks
+            with open(cache_path, "w") as f:
+                json.dump(tta_results, f)
+    else:
+        print("=" * 60)
+        print(f" SELECTIVE TTT — Phase 1: TTA  (n_perms={args.n_perms}  n_d4={args.n_d4})")
+        print("=" * 60)
+        t0 = time.time()
+        for task in tasks:
+            if args.verbose:
+                print(f"\n  Task {task['task_id']}  ({len(task['train'])} pairs):")
+            r = evaluate_task(task, model, tok, "tta", **eval_kw)
+            tta_results[task["task_id"]] = r
+            print(f"  {r['task_id']}  cell_acc={r['cell_acc']:.3f}  "
+                  f"exact_match={r['exact_match']:.3f}  ({r['n_exact']}/{r['n_pairs']} exact)")
+        print(f"  TTA time: {time.time()-t0:.0f}s")
+        # Save cache for future runs
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "w") as f:
+            json.dump(tta_results, f)
+        print(f"  TTA cache saved: {cache_path.name}")
 
     # ── Phase 2: TTT on tasks below threshold ─────────────────────────────
     # Threshold is on cell_acc so you can set e.g. 0.90 to skip "close" tasks

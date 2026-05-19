@@ -464,21 +464,28 @@ def ttt_fine_tune(
     eval_every:  int = 5,
     patience:    int = 5,
     verbose:     bool = False,
-    freeze_layers: int = -1,   # freeze first N blocks; -1 = auto (75% of depth)
+    freeze_layers:   int  = -1,    # freeze first N blocks; -1 = auto (75% of depth)
+    fixed_schedule:  bool = False, # if True: skip save-best/early-stop, return final weights
+    use_all_pairs:   bool = False, # if True: train on all pairs each step (not LOO subsets)
 ) -> ArcTransformer:
     """Return a fine-tuned *copy* of model (the original model is not modified).
 
-    - Batch size > 1: each step trains on `batch_size` differently-augmented
-      versions of the same LOO configuration, giving much richer gradient signal.
+    Two modes:
+    - LOO mode (use_all_pairs=False, default): each step picks a random LOO
+      configuration (train on N-1 pairs, target is the Nth). With save-best +
+      early stopping. Used for LOO evaluation during selective_ttt Phase 2.
+    - All-pairs mode (use_all_pairs=True, fixed_schedule=True): each step trains
+      on ALL N pairs simultaneously with augmentation. No save-best or early
+      stopping — just run n_steps and return the final weights. This is the right
+      mode for TTT-for-test: the model adapts to this specific task's rule using
+      all available demonstrations, then predicts the unknown test pair.
+
+    Common to both:
+    - Batch size > 1: each step generates `batch_size` augmented variants.
     - Cosine LR decay: starts at `lr`, tapers to lr/100 by the final step.
-    - Save-best: every `eval_every` steps, evaluate clean LOO cell accuracy and
-      keep the model state with the highest score.
-    - Early stopping: if LOO hasn't improved for `patience` consecutive eval
-      cycles, stop early. Guards against the overfitting cliff.
-    - Layer freezing: freeze the first `freeze_layers` transformer blocks so the
-      model can't deeply overfit; only the final blocks + output head adapt.
-      freeze_layers=-1 (default) freezes the first 75% of blocks automatically.
-      freeze_layers=0 trains all layers (old behaviour — tends to overfit).
+    - Layer freezing: freeze the first `freeze_layers` transformer blocks.
+      freeze_layers=-1 (default) freezes first 75% of blocks automatically.
+      freeze_layers=0 trains all layers.
     """
     ttt = copy.deepcopy(model)
     ttt.train()
@@ -495,7 +502,7 @@ def ttt_fine_tune(
         opt, T_max=n_steps, eta_min=lr * 0.01
     )
     n         = len(train_pairs)
-    can_eval  = (n >= 2)   # need ≥2 pairs for meaningful LOO eval
+    can_eval  = (n >= 2) and not fixed_schedule  # no save-best in fixed-schedule mode
 
     best_score    = -1.0
     best_state    = copy.deepcopy(ttt.state_dict())
@@ -503,13 +510,22 @@ def ttt_fine_tune(
     patience_left = patience
 
     for step in range(n_steps):
-        # Pick one LOO configuration for this step
-        test_i  = int(rng.integers(n))
-        ctx_idx = [i for i in range(n) if i != test_i]
-        if len(ctx_idx) > k_ctx:
-            ctx_idx = rng.choice(ctx_idx, size=k_ctx, replace=False).tolist()
+        if use_all_pairs:
+            # All-pairs mode: each item in the batch is one training pair used as
+            # a (context=others, target=this) sequence — all pairs contribute each step.
+            # Pick k_ctx context pairs randomly, then one target pair.
+            all_idx = list(range(n))
+            rng.shuffle(all_idx)
+            target_i = all_idx[0]
+            ctx_idx  = all_idx[1 : 1 + k_ctx]
+        else:
+            # LOO mode: pick one pair to hold out as the target each step.
+            target_i = int(rng.integers(n))
+            ctx_idx  = [i for i in range(n) if i != target_i]
+            if len(ctx_idx) > k_ctx:
+                ctx_idx = rng.choice(ctx_idx, size=k_ctx, replace=False).tolist()
 
-        # Build batch_size augmented variants of this LOO configuration
+        # Build batch_size augmented variants of this configuration
         batch_feats:  list[np.ndarray] = []
         batch_lmasks: list[np.ndarray] = []
 
@@ -519,8 +535,8 @@ def ttt_fine_tune(
             for i in ctx_idx:
                 grids.append(np.array(train_pairs[i]["input"],  dtype=np.uint8))
                 grids.append(np.array(train_pairs[i]["output"], dtype=np.uint8))
-            grids.append(np.array(train_pairs[test_i]["input"],  dtype=np.uint8))
-            grids.append(np.array(train_pairs[test_i]["output"], dtype=np.uint8))
+            grids.append(np.array(train_pairs[target_i]["input"],  dtype=np.uint8))
+            grids.append(np.array(train_pairs[target_i]["output"], dtype=np.uint8))
 
             # D4 geometric augmentation (same transform applied to all grids)
             k_rot   = int(rng.integers(4))
@@ -548,8 +564,7 @@ def ttt_fine_tune(
             scheduler.step()
             continue
 
-        # Stack into a padded batch (sequences within one task are the same
-        # length, so padding is zero or minimal)
+        # Stack into a padded batch
         max_len = max(f.shape[0] for f in batch_feats)
         B       = len(batch_feats)
         ft_batch  = torch.zeros(B, max_len, 5, dtype=torch.long,  device=device)
@@ -581,7 +596,7 @@ def ttt_fine_tune(
         opt.step()
         scheduler.step()
 
-        # Save-best + early stopping: check LOO accuracy periodically
+        # Save-best + early stopping (LOO mode only)
         if can_eval and (step + 1) % eval_every == 0:
             ttt.eval()
             score = _ttt_loo_score(ttt, tok, train_pairs, k_ctx, device)
@@ -603,8 +618,9 @@ def ttt_fine_tune(
                     break
             ttt.train()
 
-    # Restore the best observed state
-    ttt.load_state_dict(best_state)
+    # In fixed-schedule mode use the final weights; otherwise restore the best state
+    if not fixed_schedule:
+        ttt.load_state_dict(best_state)
     ttt.eval()
     return ttt
 
@@ -661,8 +677,11 @@ def evaluate_task(
     n_d4:                int  = 8,
     analyze:             bool = False,
     compare_rule_based:  bool = False,
-    ttt_patience:        int  = 5,
-    ttt_freeze_layers:   int  = 9,
+    ttt_patience:        int   = 5,
+    ttt_freeze_layers:   int   = -1,
+    ttt_for_test:        bool  = False,  # fine-tune on ALL train pairs → predict test
+    ttt_test_steps:      int   = 50,     # steps for TTT-for-test (tune offline)
+    ttt_test_lr:         float = 1e-5,   # lower LR for test fine-tuning
 ) -> dict:
     train = task["train"]
     accs, exacts = [], []
@@ -748,11 +767,26 @@ def evaluate_task(
                       for p in train[:k_ctx]]
         rule_pred  = try_rule_based(task)   # None if no solver fires
 
-        neural_test_accs:   list[float] = []
-        neural_test_exacts: list[bool]  = []
-        rule_test_accs:     list[float] = []
-        rule_test_exacts:   list[bool]  = []
-        agreements:         list[bool]  = []
+        # Build TTT-for-test model once (fine-tune on ALL training pairs, fixed schedule)
+        if ttt_for_test and len(train) >= 2:
+            n_freeze = (int(len(model.blocks) * 0.75)
+                        if ttt_freeze_layers < 0 else ttt_freeze_layers)
+            ttt_test_model = ttt_fine_tune(
+                model, tok, train, ttt_test_steps, ttt_test_lr, device, rng,
+                k_ctx, ttt_batch_size, ttt_eval_every, ttt_patience,
+                verbose=False, freeze_layers=n_freeze,
+                fixed_schedule=True, use_all_pairs=True,
+            )
+        else:
+            ttt_test_model = None
+
+        neural_test_accs:    list[float] = []
+        neural_test_exacts:  list[bool]  = []
+        ttt_test_accs:       list[float] = []
+        ttt_test_exacts:     list[bool]  = []
+        rule_test_accs:      list[float] = []
+        rule_test_exacts:    list[bool]  = []
+        agreements:          list[bool]  = []
 
         for tp in test_pairs:
             if "output" not in tp:
@@ -761,12 +795,22 @@ def evaluate_task(
             target  = np.array(tp["output"], dtype=np.uint8)
             H, W    = target.shape
 
-            # Neural greedy on actual test pair
-            neural_pred = greedy_decode(model, tok, ctx_all, test_in, H, W, device)
+            # Neural: TTA on base model (replaces old greedy decode)
+            neural_pred = tta_decode(model, tok, ctx_all, test_in, H, W,
+                                     n_perms, device, rng, n_d4)
             n_ca = float((neural_pred == target).mean())
             n_em = bool(np.array_equal(neural_pred, target))
             neural_test_accs.append(n_ca)
             neural_test_exacts.append(n_em)
+
+            # TTT-for-test: TTA on fine-tuned model
+            if ttt_test_model is not None:
+                ttt_pred = tta_decode(ttt_test_model, tok, ctx_all, test_in, H, W,
+                                      n_perms, device, rng, n_d4)
+                t_ca = float((ttt_pred == target).mean())
+                t_em = bool(np.array_equal(ttt_pred, target))
+                ttt_test_accs.append(t_ca)
+                ttt_test_exacts.append(t_em)
 
             # Rule-based (already computed for whole task)
             if rule_pred is not None and rule_pred.shape == target.shape:
@@ -776,33 +820,45 @@ def evaluate_task(
                 rule_test_exacts.append(r_em)
                 agreements.append(bool(np.array_equal(neural_pred, rule_pred)))
 
-        # Dispatcher: rule-based if it fires, neural otherwise
+        # Dispatcher: rule-based first, then best of TTT/TTA, then TTA
+        best_neural_accs   = ttt_test_accs   if ttt_test_accs   else neural_test_accs
+        best_neural_exacts = ttt_test_exacts if ttt_test_exacts else neural_test_exacts
         if rule_pred is not None and rule_test_accs:
             disp_acc   = float(np.mean(rule_test_accs))
             disp_exact = bool(all(rule_test_exacts))
         else:
-            disp_acc   = float(np.mean(neural_test_accs))   if neural_test_accs else None
-            disp_exact = bool(all(neural_test_exacts))       if neural_test_exacts else None
+            disp_acc   = float(np.mean(best_neural_accs))   if best_neural_accs else None
+            disp_exact = bool(all(best_neural_exacts))       if best_neural_exacts else None
 
         cmp: dict = {
-            "neural_test_acc":      float(np.mean(neural_test_accs))   if neural_test_accs   else None,
-            "neural_test_exact":    bool(all(neural_test_exacts))       if neural_test_exacts else None,
-            "rule_fires":           rule_pred is not None,
-            "rule_test_acc":        float(np.mean(rule_test_accs))      if rule_test_accs     else None,
-            "rule_test_exact":      bool(all(rule_test_exacts))         if rule_test_exacts   else None,
-            "agree":                bool(all(agreements))               if agreements         else None,
-            "dispatcher_test_acc":  disp_acc,
+            "neural_test_acc":       float(np.mean(neural_test_accs))  if neural_test_accs  else None,
+            "neural_test_exact":     bool(all(neural_test_exacts))      if neural_test_exacts else None,
+            "ttt_test_acc":          float(np.mean(ttt_test_accs))      if ttt_test_accs     else None,
+            "ttt_test_exact":        bool(all(ttt_test_exacts))         if ttt_test_exacts   else None,
+            "rule_fires":            rule_pred is not None,
+            "rule_test_acc":         float(np.mean(rule_test_accs))     if rule_test_accs    else None,
+            "rule_test_exact":       bool(all(rule_test_exacts))        if rule_test_exacts  else None,
+            "agree":                 bool(all(agreements))              if agreements        else None,
+            "dispatcher_test_acc":   disp_acc,
             "dispatcher_test_exact": disp_exact,
         }
 
-        if verbose and rule_pred is not None:
-            tag = "AGREE" if cmp["agree"] else "DISAGREE"
-            print(f"    [test] neural={cmp['neural_test_acc']:.3f}{'✓' if cmp['neural_test_exact'] else '✗'}"
-                  f"  rule={cmp['rule_test_acc']:.3f}{'✓' if cmp['rule_test_exact'] else '✗'}"
-                  f"  {tag}")
-        elif verbose:
-            print(f"    [test] neural={cmp['neural_test_acc']:.3f}{'✓' if cmp['neural_test_exact'] else '✗'}"
-                  f"  rule=n/a")
+        if verbose:
+            ttt_str = ""
+            if ttt_test_accs:
+                ttt_str = (f"  ttt={cmp['ttt_test_acc']:.3f}"
+                           f"{'✓' if cmp['ttt_test_exact'] else '✗'}")
+            rule_str = ""
+            if rule_pred is not None:
+                tag      = "AGREE" if cmp["agree"] else "DISAGREE"
+                rule_str = (f"  rule={cmp['rule_test_acc']:.3f}"
+                            f"{'✓' if cmp['rule_test_exact'] else '✗'}"
+                            f"  {tag}")
+            else:
+                rule_str = "  rule=n/a"
+            print(f"    [test] tta={cmp['neural_test_acc']:.3f}"
+                  f"{'✓' if cmp['neural_test_exact'] else '✗'}"
+                  f"{ttt_str}{rule_str}")
 
         result["rule_cmp"] = cmp
 
@@ -841,6 +897,9 @@ def _run_selective_ttt(tasks, model, tok, args, device, rng):
         compare_rule_based=args.compare_rule_based,
         ttt_patience=args.ttt_patience,
         ttt_freeze_layers=args.ttt_freeze_layers,
+        ttt_for_test=args.ttt_for_test,
+        ttt_test_steps=args.ttt_test_steps,
+        ttt_test_lr=args.ttt_test_lr,
     )
 
     # ── Phase 1: TTA on all tasks (with cache) ───────────────────────────
@@ -989,6 +1048,13 @@ def main():
     ap.add_argument("--compare-rule-based", action="store_true",
                     help="For each task, also run rule-based solvers on the actual test pair "
                          "and compare with the neural model prediction")
+    ap.add_argument("--ttt-for-test",   action="store_true",
+                    help="Fine-tune on ALL training pairs then TTA-predict the test pair "
+                         "(requires --compare-rule-based; shows tta= vs ttt= on test)")
+    ap.add_argument("--ttt-test-steps", type=int,   default=50,
+                    help="Fixed fine-tuning steps for TTT-for-test (default: 50; tune offline)")
+    ap.add_argument("--ttt-test-lr",    type=float, default=1e-5,
+                    help="Learning rate for TTT-for-test fine-tuning (default: 1e-5)")
     ap.add_argument("--output-file", default=None,
                     help="Where to save the JSON analysis (default: results/error_analysis_{mode}_{ckpt_stem}.json)")
     ap.add_argument("--seed",       type=int,   default=42)
@@ -1052,6 +1118,9 @@ def main():
                 compare_rule_based=args.compare_rule_based,
                 ttt_patience=args.ttt_patience,
                 ttt_freeze_layers=args.ttt_freeze_layers,
+                ttt_for_test=args.ttt_for_test,
+                ttt_test_steps=args.ttt_test_steps,
+                ttt_test_lr=args.ttt_test_lr,
             )
             results.append(r)
             print(f"  {r['task_id']}  "

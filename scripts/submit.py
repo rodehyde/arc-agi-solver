@@ -235,6 +235,8 @@ def main():
             device=device, rng1=rng1, rng2=rng2, verbose=args.verbose,
         )
         results.append(r)
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
         # Build submission entry (one prediction per test pair)
         tid = r["task_id"]

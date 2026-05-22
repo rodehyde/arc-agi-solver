@@ -355,48 +355,91 @@ class ArcTransformer(nn.Module):
         out_width:   int,
         grid_number: int,
     ) -> np.ndarray:
-        """Greedily generate one output grid using KV caching.
+        """Greedily generate one output grid using pre-allocated KV buffers.
 
-        Encodes the prefix once (O(T_prefix²)), then generates each output
-        token with a single-token forward pass (O(T) per step), making total
-        generation cost O(T_prefix² + H·W·T_total) instead of O((T_prefix + H·W)³).
+        Phase 1 — prefill: encode the full prefix in one forward pass,
+        storing K and V for every layer into pre-allocated buffers.
+
+        Phase 2 — decode: for each output cell, run a single-token forward
+        pass that writes the new K/V directly into the buffer (no allocation,
+        no copying of previous cache data) and reads a contiguous view for
+        the attention computation.
+
+        Cost: O(T_prefix²) for prefill + O(H·W·T_total) for decode,
+        with zero dynamic memory allocation during decode.
 
         Returns a (out_height, out_width) uint8 array.
         """
         from src.arc_tokenizer import ROW_SEP
 
-        T_prefix = prefix.shape[1]
+        T_prefix  = prefix.shape[1]
+        B         = prefix.shape[0]
+        H         = self.blocks[0].attn.n_heads
+        hd        = self.blocks[0].attn.head_dim
+        D         = self.d_model
+        device    = prefix.device
+        max_new   = out_height * out_width + (out_height - 1)   # cells + row-seps
+        T_total   = T_prefix + max_new
 
-        # Phase 1: encode prefix in one pass, get first-cell logit + KV caches
-        current_logits, kv_caches = self._prefill(prefix, pad_mask)
+        # ── Phase 1: prefill ─────────────────────────────────────────────────
+        emb = self._build_embedding(prefix)
+        h   = emb
+        k_bufs: list[torch.Tensor] = []
+        v_bufs: list[torch.Tensor] = []
+        for block in self.blocks:
+            h, k, v = block.forward_and_cache(h, pad_mask)
+            k_buf = torch.empty(B, H, T_total, hd, device=device, dtype=k.dtype)
+            v_buf = torch.empty(B, H, T_total, hd, device=device, dtype=v.dtype)
+            k_buf[:, :, :T_prefix, :].copy_(k)
+            v_buf[:, :, :T_prefix, :].copy_(v)
+            k_bufs.append(k_buf)
+            v_bufs.append(v_buf)
 
+        current_logits = self.head(self.ln_final(h[:, -1:, :]))[:, 0, :]
+
+        # ── Phase 2: decode ───────────────────────────────────────────────────
         generated: list[int] = []
         prev_color = -1
-        abs_pos    = T_prefix   # absolute position of the next token to be appended
+        fill_pos   = T_prefix   # next slot to write in the K/V buffers
+
+        def _step(feat: torch.Tensor) -> torch.Tensor:
+            """One decode step: write K/V at fill_pos, return next-token logit."""
+            nonlocal fill_pos
+            h = self._build_embedding_at_pos(feat, fill_pos)
+            for i, block in enumerate(self.blocks):
+                normed = block.ln1(h)
+                qkv    = block.attn.qkv(normed).reshape(
+                             B, 1, 3, H, hd).permute(2, 0, 3, 1, 4)
+                q, k_new, v_new = qkv[0], qkv[1], qkv[2]
+                # In-place write — no allocation, no copy of existing cache
+                k_bufs[i][:, :, fill_pos:fill_pos + 1, :] = k_new
+                v_bufs[i][:, :, fill_pos:fill_pos + 1, :] = v_new
+                # Contiguous view of filled portion — no copy
+                k_act = k_bufs[i][:, :, :fill_pos + 1, :]
+                v_act = v_bufs[i][:, :, :fill_pos + 1, :]
+                attn  = F.scaled_dot_product_attention(q, k_act, v_act, is_causal=False)
+                attn  = block.attn.out(attn.transpose(1, 2).reshape(B, 1, D))
+                h     = h + attn
+                h     = h + block.ffn(block.ln2(h))
+            fill_pos += 1
+            return self.head(self.ln_final(h[:, -1:, :]))[:, 0, :]
 
         for r in range(out_height):
             for c in range(out_width):
-                # Predict this cell from the current logit
                 next_tok = int(current_logits[0].argmax().item())
                 next_tok = max(0, min(9, next_tok))
                 generated.append(next_tok)
-
-                change = 1 if (next_tok != prev_color and prev_color >= 0) else 0
+                change     = 1 if (next_tok != prev_color and prev_color >= 0) else 0
                 prev_color = next_tok
-
-                # Decode with this token → get logit for next cell
                 feat = torch.tensor(
                     [[[next_tok, c + 1, r + 1, change, grid_number]]],
-                    device=prefix.device, dtype=torch.int64)
-                current_logits, kv_caches = self._decode_step(feat, abs_pos, kv_caches)
-                abs_pos += 1
+                    device=device, dtype=torch.int64)
+                current_logits = _step(feat)
 
-            # Insert ROW_SEP between rows (updates KV cache; logit used for first cell of next row)
             if r < out_height - 1:
-                sep_feat = torch.tensor(
+                sep = torch.tensor(
                     [[[ROW_SEP, 0, 0, 0, grid_number]]],
-                    device=prefix.device, dtype=torch.int64)
-                current_logits, kv_caches = self._decode_step(sep_feat, abs_pos, kv_caches)
-                abs_pos += 1
+                    device=device, dtype=torch.int64)
+                current_logits = _step(sep)
 
         return np.array(generated, dtype=np.uint8).reshape(out_height, out_width)

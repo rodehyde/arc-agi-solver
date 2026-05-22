@@ -73,6 +73,34 @@ class MultiHeadCausalAttention(nn.Module):
         out = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=dp)
         return self.out(out.transpose(1, 2).reshape(B, T, D))
 
+    def forward_and_cache(self, x: torch.Tensor, pad_mask: torch.Tensor | None = None):
+        """Like forward() but also returns K, V for KV caching."""
+        B, T, D = x.shape
+        H = self.n_heads
+        qkv = self.qkv(x).reshape(B, T, 3, H, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        dp  = self.dropout if self.training else 0.0
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=dp)
+        return self.out(out.transpose(1, 2).reshape(B, T, D)), k, v
+
+    def forward_with_kv(self, x_new: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor):
+        """Decode a single new token attending to all cached past tokens.
+
+        x_new   : (B, 1, D)
+        k_cache : (B, H, T_past, head_dim)
+        v_cache : (B, H, T_past, head_dim)
+        Returns : (output (B, 1, D), k_full, v_full) — cache extended by 1
+        """
+        B, _, D = x_new.shape
+        H = self.n_heads
+        qkv = self.qkv(x_new).reshape(B, 1, 3, H, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k_new, v_new = qkv[0], qkv[1], qkv[2]
+        k = torch.cat([k_cache, k_new], dim=2)
+        v = torch.cat([v_cache, v_new], dim=2)
+        # Single query attends to all past tokens — no causal mask needed
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
+        return self.out(out.transpose(1, 2).reshape(B, 1, D)), k, v
+
 
 class TransformerBlock(nn.Module):
     """Pre-norm: LN → attn → residual, LN → FFN → residual."""
@@ -94,6 +122,20 @@ class TransformerBlock(nn.Module):
         x = x + self.attn(self.ln1(x), pad_mask)
         x = x + self.ffn(self.ln2(x))
         return x
+
+    def forward_and_cache(self, x: torch.Tensor, pad_mask: torch.Tensor | None = None):
+        normed = self.ln1(x)
+        attn_out, k, v = self.attn.forward_and_cache(normed, pad_mask)
+        x = x + attn_out
+        x = x + self.ffn(self.ln2(x))
+        return x, k, v
+
+    def forward_with_kv(self, x_new: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor):
+        normed = self.ln1(x_new)
+        attn_out, k, v = self.attn.forward_with_kv(normed, k_cache, v_cache)
+        x_new = x_new + attn_out
+        x_new = x_new + self.ffn(self.ln2(x_new))
+        return x_new, k, v
 
 
 # ---------------------------------------------------------------------------
@@ -243,56 +285,118 @@ class ArcTransformer(nn.Module):
         return self.head(self.ln_final(emb))
 
     # ------------------------------------------------------------------
-    # Greedy inference (token-by-token)
+    # KV-cached greedy inference
     # ------------------------------------------------------------------
+
+    def _prefill(self, prefix: torch.Tensor, pad_mask: torch.Tensor):
+        """Encode the entire prefix in one forward pass.
+
+        Returns (logits_at_last_pos, kv_caches) where:
+          logits_at_last_pos : (B, vocab_size) — prediction after the last prefix token
+          kv_caches          : list of (k, v) per transformer block,
+                               each (B, n_heads, T_prefix, head_dim)
+        """
+        emb = self._build_embedding(prefix)
+        h   = emb
+        kv_caches = []
+        for block in self.blocks:
+            h, k, v = block.forward_and_cache(h, pad_mask)
+            kv_caches.append((k, v))
+        logits = self.head(self.ln_final(h[:, -1:, :]))   # (B, 1, vocab_size)
+        return logits[:, 0, :], kv_caches
+
+    def _build_embedding_at_pos(self, feat: torch.Tensor, abs_pos: int) -> torch.Tensor:
+        """Build embedding for a single token at a specific absolute sequence position.
+
+        feat    : (B, 1, 5) int64
+        abs_pos : absolute index of this token in the full sequence
+        Returns : (B, 1, d_model)
+        """
+        x = feat.long()
+        tok_ids = x[:, :, 0]
+        col_ids = x[:, :, 1].clamp(0, self.col_sin.shape[0] - 1)
+        row_ids = x[:, :, 2].clamp(0, self.row_sin.shape[0] - 1)
+        chg_ids = x[:, :, 3].clamp(0, 1)
+        seg_ids = x[:, :, 4].clamp(0, self.seg_emb.num_embeddings - 1)
+
+        max_pos = self.seq_pos_emb.num_embeddings - 1
+        pos_idx = torch.tensor([[abs_pos]], device=feat.device).clamp(0, max_pos)
+
+        s = self.enc_scale
+        return (self.tok_emb(tok_ids)
+                + s[0] * self.row_proj(self.row_sin[row_ids])
+                + s[1] * self.col_proj(self.col_sin[col_ids])
+                + s[2] * self.seg_proj(self.seg_emb(seg_ids))
+                + self.chg_emb(chg_ids)
+                + self.seq_pos_emb(pos_idx))
+
+    def _decode_step(self, feat: torch.Tensor, abs_pos: int, kv_caches: list):
+        """Process one new token, extend KV caches, return logit for the next token.
+
+        feat      : (B, 1, 5) int64 — features of the new token
+        abs_pos   : absolute sequence position of this token
+        kv_caches : list of (k, v) per block (from _prefill or previous step)
+        Returns   : (logits (B, vocab_size), new_kv_caches)
+        """
+        h = self._build_embedding_at_pos(feat, abs_pos)
+        new_kv = []
+        for block, (k_cache, v_cache) in zip(self.blocks, kv_caches):
+            h, k, v = block.forward_with_kv(h, k_cache, v_cache)
+            new_kv.append((k, v))
+        logits = self.head(self.ln_final(h[:, -1:, :]))[:, 0, :]   # (B, vocab_size)
+        return logits, new_kv
 
     @torch.no_grad()
     def generate(
         self,
-        prefix:         torch.Tensor,   # (1, T_prefix, 5)
-        pad_mask:       torch.Tensor,   # (1, T_prefix) — all False
-        out_height:     int,
-        out_width:      int,
-        grid_number:    int,
+        prefix:      torch.Tensor,   # (1, T_prefix, 5)
+        pad_mask:    torch.Tensor,   # (1, T_prefix) — all False
+        out_height:  int,
+        out_width:   int,
+        grid_number: int,
     ) -> np.ndarray:
-        """Greedily generate one output grid token-by-token.
+        """Greedily generate one output grid using KV caching.
 
-        Tracks row/col position to provide correct spatial features as
-        generation proceeds. Returns a (out_height, out_width) uint8 array.
+        Encodes the prefix once (O(T_prefix²)), then generates each output
+        token with a single-token forward pass (O(T) per step), making total
+        generation cost O(T_prefix² + H·W·T_total) instead of O((T_prefix + H·W)³).
+
+        Returns a (out_height, out_width) uint8 array.
         """
-        import numpy as np
+        from src.arc_tokenizer import ROW_SEP
 
-        cur = prefix.clone()
-        cur_pad = pad_mask.clone()
+        T_prefix = prefix.shape[1]
+
+        # Phase 1: encode prefix in one pass, get first-cell logit + KV caches
+        current_logits, kv_caches = self._prefill(prefix, pad_mask)
+
         generated: list[int] = []
-
-        # We'll generate: cell tokens row by row, with ROW_SEP after each row
-        from src.arc_tokenizer import ROW_SEP, END_OUT
-
         prev_color = -1
+        abs_pos    = T_prefix   # absolute position of the next token to be appended
+
         for r in range(out_height):
             for c in range(out_width):
-                logits   = self(cur, cur_pad)          # (1, T, V)
-                next_tok = logits[0, -1, :].argmax().item()
-                # Clamp to valid color range (0-9)
+                # Predict this cell from the current logit
+                next_tok = int(current_logits[0].argmax().item())
                 next_tok = max(0, min(9, next_tok))
                 generated.append(next_tok)
+
                 change = 1 if (next_tok != prev_color and prev_color >= 0) else 0
                 prev_color = next_tok
-                new_feat = torch.tensor(
+
+                # Decode with this token → get logit for next cell
+                feat = torch.tensor(
                     [[[next_tok, c + 1, r + 1, change, grid_number]]],
                     device=prefix.device, dtype=torch.int64)
-                new_pad = torch.zeros((1, 1), device=prefix.device, dtype=torch.bool)
-                cur     = torch.cat([cur,     new_feat], dim=1)
-                cur_pad = torch.cat([cur_pad, new_pad],  dim=1)
+                current_logits, kv_caches = self._decode_step(feat, abs_pos, kv_caches)
+                abs_pos += 1
 
-            # ROW_SEP after each row
-            sep_feat = torch.tensor(
-                [[[ROW_SEP, 0, 0, 0, grid_number]]],
-                device=prefix.device, dtype=torch.int64)
-            new_pad = torch.zeros((1, 1), device=prefix.device, dtype=torch.bool)
-            cur     = torch.cat([cur,     sep_feat], dim=1)
-            cur_pad = torch.cat([cur_pad, new_pad],  dim=1)
+            # Insert ROW_SEP between rows (updates KV cache; logit used for first cell of next row)
+            if r < out_height - 1:
+                sep_feat = torch.tensor(
+                    [[[ROW_SEP, 0, 0, 0, grid_number]]],
+                    device=prefix.device, dtype=torch.int64)
+                current_logits, kv_caches = self._decode_step(sep_feat, abs_pos, kv_caches)
+                abs_pos += 1
 
-        grid = np.array(generated, dtype=np.uint8).reshape(out_height, out_width)
-        return grid
+        return np.array(generated, dtype=np.uint8).reshape(out_height, out_width)

@@ -349,13 +349,16 @@ class ArcTransformer(nn.Module):
     @torch.no_grad()
     def generate(
         self,
-        prefix:      torch.Tensor,   # (1, T_prefix, 5)
-        pad_mask:    torch.Tensor,   # (1, T_prefix) — all False
+        prefix:      torch.Tensor,   # (B, T_prefix, 5)
+        pad_mask:    torch.Tensor,   # (B, T_prefix) — all False
         out_height:  int,
         out_width:   int,
         grid_number: int,
     ) -> np.ndarray:
-        """Greedily generate one output grid using pre-allocated KV buffers.
+        """Greedily generate output grids using pre-allocated KV buffers.
+
+        Supports batch_size B > 1 for TTA parallelism: pass B colour-permuted
+        or D4-transformed prefixes as a batch and get B predictions back.
 
         Phase 1 — prefill: encode the full prefix in one forward pass,
         storing K and V for every layer into pre-allocated buffers.
@@ -368,7 +371,9 @@ class ArcTransformer(nn.Module):
         Cost: O(T_prefix²) for prefill + O(H·W·T_total) for decode,
         with zero dynamic memory allocation during decode.
 
-        Returns a (out_height, out_width) uint8 array.
+        Returns:
+          B == 1 → (out_height, out_width) uint8 numpy array
+          B  > 1 → (B, out_height, out_width) uint8 numpy array
         """
         from src.arc_tokenizer import ROW_SEP
 
@@ -395,15 +400,15 @@ class ArcTransformer(nn.Module):
             k_bufs.append(k_buf)
             v_bufs.append(v_buf)
 
-        current_logits = self.head(self.ln_final(h[:, -1:, :]))[:, 0, :]
+        current_logits = self.head(self.ln_final(h[:, -1:, :]))[:, 0, :]   # (B, vocab)
 
         # ── Phase 2: decode ───────────────────────────────────────────────────
-        generated: list[int] = []
-        prev_color = -1
-        fill_pos   = T_prefix   # next slot to write in the K/V buffers
+        generated: list[torch.Tensor] = []           # each: (B,) int64 on device
+        prev_colors = torch.full((B,), -1, device=device, dtype=torch.int64)
+        fill_pos    = T_prefix   # next slot to write in the K/V buffers
 
         def _step(feat: torch.Tensor) -> torch.Tensor:
-            """One decode step: write K/V at fill_pos, return next-token logit."""
+            """One decode step: write K/V at fill_pos, return next-token logits (B, vocab)."""
             nonlocal fill_pos
             h = self._build_embedding_at_pos(feat, fill_pos)
             for i, block in enumerate(self.blocks):
@@ -422,24 +427,29 @@ class ArcTransformer(nn.Module):
                 h     = h + attn
                 h     = h + block.ffn(block.ln2(h))
             fill_pos += 1
-            return self.head(self.ln_final(h[:, -1:, :]))[:, 0, :]
+            return self.head(self.ln_final(h[:, -1:, :]))[:, 0, :]   # (B, vocab)
 
         for r in range(out_height):
             for c in range(out_width):
-                next_tok = int(current_logits[0].argmax().item())
-                next_tok = max(0, min(9, next_tok))
-                generated.append(next_tok)
-                change     = 1 if (next_tok != prev_color and prev_color >= 0) else 0
-                prev_color = next_tok
-                feat = torch.tensor(
-                    [[[next_tok, c + 1, r + 1, change, grid_number]]],
-                    device=device, dtype=torch.int64)
+                next_toks = current_logits.argmax(dim=-1).clamp(0, 9)   # (B,)
+                generated.append(next_toks)
+                changes     = ((next_toks != prev_colors) & (prev_colors >= 0)).long()
+                prev_colors = next_toks
+                feat = torch.empty(B, 1, 5, device=device, dtype=torch.int64)
+                feat[:, 0, 0] = next_toks
+                feat[:, 0, 1] = c + 1
+                feat[:, 0, 2] = r + 1
+                feat[:, 0, 3] = changes
+                feat[:, 0, 4] = grid_number
                 current_logits = _step(feat)
 
             if r < out_height - 1:
-                sep = torch.tensor(
-                    [[[ROW_SEP, 0, 0, 0, grid_number]]],
-                    device=device, dtype=torch.int64)
+                sep = torch.zeros(B, 1, 5, device=device, dtype=torch.int64)
+                sep[:, 0, 0] = ROW_SEP
+                sep[:, 0, 4] = grid_number
                 current_logits = _step(sep)
 
-        return np.array(generated, dtype=np.uint8).reshape(out_height, out_width)
+        # Stack cell predictions: (B, H*W) → (B, out_height, out_width)
+        result = torch.stack(generated, dim=1).cpu().numpy().astype(np.uint8)
+        result = result.reshape(B, out_height, out_width)
+        return result[0] if B == 1 else result

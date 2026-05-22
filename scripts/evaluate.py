@@ -400,6 +400,12 @@ def tta_decode(
         H_t = W if k_rot % 2 else H
         W_t = H if k_rot % 2 else W
 
+        # Build all n_perms colour-permuted prefixes in one batch so the GPU
+        # processes them in parallel (n_perms sequential calls → 1 batched call).
+        prefixes:   list[torch.Tensor]  = []
+        pad_masks:  list[torch.Tensor]  = []
+        inv_perms:  list[np.ndarray]    = []
+        gnum = None
         for _ in range(n_perms):
             perm     = np.arange(10, dtype=np.uint8)
             perm[1:] = rng.permutation(9) + 1
@@ -408,9 +414,19 @@ def tta_decode(
                 inv_perm[v] = i
 
             perm_ctx = [(perm[inp], perm[out]) for inp, out in d4_ctx]
-            pred_t   = greedy_decode(model, tok, perm_ctx, perm[d4_test_in],
-                                     H_t, W_t, device)
-            pred     = _d4_reverse(inv_perm[pred_t], k_rot, do_flip)
+            prefix, pad_mask, gnum = build_prefix(tok, perm_ctx, perm[d4_test_in])
+            prefixes.append(prefix)     # (1, T, 5)
+            pad_masks.append(pad_mask)  # (1, T)
+            inv_perms.append(inv_perm)  # (10,) uint8
+
+        # Single batched generate call — (n_perms, H_t, W_t) uint8
+        batch_prefix   = torch.cat(prefixes,  dim=0).to(device)   # (n_perms, T, 5)
+        batch_pad_mask = torch.cat(pad_masks, dim=0).to(device)   # (n_perms, T)
+        with torch.no_grad():
+            batch_pred_t = model.generate(batch_prefix, batch_pad_mask, H_t, W_t, gnum)
+
+        for pi in range(n_perms):
+            pred = _d4_reverse(inv_perms[pi][batch_pred_t[pi]], k_rot, do_flip)
             preds.append(pred)
 
     return majority_vote(preds)

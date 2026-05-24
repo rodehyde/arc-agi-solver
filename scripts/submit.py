@@ -2,8 +2,16 @@
 submit.py — Generate a Kaggle ARC-AGI submission from a trained checkpoint.
 
 Runs inference on tasks in data/evaluation/ (or --data-dir).  For each task:
-  Attempt 1: rule-based solver (if it fires), otherwise TTA
-  Attempt 2: TTA with a different RNG seed (provides variety vs attempt 1)
+  Attempt 1: rule-based solver (if it fires), otherwise TTT+TTA or TTA
+  Attempt 2: TTA with a different RNG seed (base model, no TTT)
+
+TTT (Test-Time Training) can be enabled with --ttt-steps N.  The model is
+fine-tuned on each task's own training pairs before predicting, using all
+pairs with augmentation (no leave-one-out).  This significantly improves
+accuracy on novel tasks at the cost of ~1–3 min/task extra GPU time.
+
+Caching: completed task results are written to --cache-file after each task
+so the run can be interrupted and resumed across Colab sessions.
 
 Output shape is inferred from training pairs when no ground-truth is available.
 If the evaluation files include test outputs (as the public ARC-AGI dataset does),
@@ -23,7 +31,11 @@ Kaggle submission format:
   }
 
 Usage (local):
-    python scripts/submit.py --checkpoint checkpoints/transformer_call_400_arc_best.pt
+    python scripts/submit.py --checkpoint checkpoints/transformer_pooled_278_best.pt
+
+Usage with TTT:
+    python scripts/submit.py --checkpoint checkpoints/transformer_pooled_278_best.pt \\
+        --ttt-steps 100 --cache-file results/cache_pooled_278.json
 
 Usage (Colab): run via submit_colab.ipynb
 """
@@ -45,6 +57,7 @@ from scripts.evaluate import (
     load_checkpoint,
     greedy_decode,
     tta_decode,
+    ttt_decode,
     try_rule_based,
 )
 
@@ -84,29 +97,41 @@ def infer_output_shape(task: dict, test_in: np.ndarray) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 def predict_task(
-    task:     dict,
-    model:    ArcTransformer,
-    tok:      ArcTokenizer,
-    n_perms:  int,
-    n_d4:     int,
-    k_ctx:    int,
-    device:   torch.device,
-    rng1:     np.random.Generator,
-    rng2:     np.random.Generator,
-    verbose:  bool = False,
+    task:       dict,
+    model:      ArcTransformer,
+    tok:        ArcTokenizer,
+    n_perms:    int,
+    n_d4:       int,
+    k_ctx:      int,
+    device:     torch.device,
+    rng1:       np.random.Generator,
+    rng2:       np.random.Generator,
+    ttt_steps:  int   = 0,
+    ttt_lr:     float = 1e-4,
+    verbose:    bool  = False,
 ) -> dict:
-    """Return attempt_1, attempt_2 (lists of lists of int) and diagnostic info."""
+    """Return attempt_1, attempt_2 (lists of lists of int) and diagnostic info.
+
+    Attempt 1: rule-based if it fires, else TTT+TTA (if ttt_steps>0) or TTA.
+    Attempt 2: always plain TTA with rng2 (base model, different seed).
+    """
     train = task["train"]
     tests = task.get("test", [])
     tid   = task.get("task_id", "unknown")
 
-    # Build context from all training pairs (up to k_ctx)
+    # Build context from all training pairs (used as-is for attempt 2 / rule check)
     ctx = [(np.array(p["input"],  dtype=np.uint8),
             np.array(p["output"], dtype=np.uint8))
            for p in train[:k_ctx]]
 
     # Rule-based attempt (whole-task, once)
     rule_pred = try_rule_based(task)
+
+    # Fine-tune once per task (all pairs, fixed schedule) — reused for every test pair
+    if ttt_steps > 0 and rule_pred is None:
+        ttt_model_ready = True
+    else:
+        ttt_model_ready = False
 
     attempts_1: list[list[list[int]]] = []
     attempts_2: list[list[list[int]]] = []
@@ -117,21 +142,27 @@ def predict_task(
         test_in = np.array(tp["input"], dtype=np.uint8)
         target  = np.array(tp["output"], dtype=np.uint8) if "output" in tp else None
 
-        # Infer output shape
         if target is not None:
             H, W = target.shape
         else:
             H, W = infer_output_shape(task, test_in)
 
-        # Attempt 1: rule-based if it fires and shape matches, else TTA
+        # Attempt 1
         if rule_pred is not None and rule_pred.shape == (H, W):
             pred1 = rule_pred
+        elif ttt_model_ready:
+            pred1 = ttt_decode(
+                model, tok, train, test_in, H, W,
+                n_steps=ttt_steps, n_perms=n_perms, lr=ttt_lr,
+                device=device, rng=rng1, k_ctx=k_ctx,
+                n_d4=n_d4, use_all_pairs=True, fixed_schedule=True,
+            )
         elif n_perms > 1:
             pred1 = tta_decode(model, tok, ctx, test_in, H, W, n_perms, device, rng1, n_d4)
         else:
             pred1 = greedy_decode(model, tok, ctx, test_in, H, W, device)
 
-        # Attempt 2: TTA with different seed (always neural, gives variety)
+        # Attempt 2: plain TTA on base model, independent seed
         if n_perms > 1:
             pred2 = tta_decode(model, tok, ctx, test_in, H, W, n_perms, device, rng2, n_d4)
         else:
@@ -146,18 +177,18 @@ def predict_task(
             correct_2 += int(np.array_equal(pred2, target))
 
     if verbose:
-        rule_tag = "rule✓" if rule_pred is not None else "     "
+        mode_tag = "ttt " if ttt_model_ready else ("rule" if rule_pred is not None else "tta ")
         acc_str  = f"  exact1={correct_1}/{n_test}  exact2={correct_2}/{n_test}" if n_test else ""
-        print(f"  {tid}  {rule_tag}{acc_str}")
+        print(f"  {tid}  [{mode_tag}]{acc_str}")
 
     return {
-        "task_id":   tid,
-        "attempt_1": attempts_1,
-        "attempt_2": attempts_2,
-        "n_test":    n_test,
-        "correct_1": correct_1,  # 0 if no ground truth
-        "correct_2": correct_2,
-        "rule_fired": rule_pred is not None,
+        "task_id":         tid,
+        "attempt_1":       attempts_1,
+        "attempt_2":       attempts_2,
+        "n_test":          n_test,
+        "correct_1":       correct_1,
+        "correct_2":       correct_2,
+        "rule_fired":      rule_pred is not None,
         "has_ground_truth": any("output" in tp for tp in tests),
     }
 
@@ -170,25 +201,33 @@ def main():
     ap = argparse.ArgumentParser(
         description="Generate Kaggle ARC-AGI submission from a trained checkpoint."
     )
-    ap.add_argument("--checkpoint", required=True,
+    ap.add_argument("--checkpoint",  required=True,
                     help="Path to .pt checkpoint")
-    ap.add_argument("--data-dir",   default=str(EVAL_DIR),
+    ap.add_argument("--data-dir",    default=str(EVAL_DIR),
                     help=f"Directory containing ARC task JSON files (default: {EVAL_DIR})")
-    ap.add_argument("--n-perms",    type=int, default=20,
+    ap.add_argument("--n-perms",     type=int, default=20,
                     help="Colour permutations per D4 orientation for TTA (default: 20)")
-    ap.add_argument("--n-d4",       type=int, default=8,
+    ap.add_argument("--n-d4",        type=int, default=8,
                     help="D4 orientations: 1=colour-only, 8=all D4 (default: 8)")
-    ap.add_argument("--k-context",  type=int, default=3,
+    ap.add_argument("--k-context",   type=int, default=3,
                     help="Max context pairs (default: 3)")
-    ap.add_argument("--task-ids",   nargs="+", default=None,
+    ap.add_argument("--task-ids",    nargs="+", default=None,
                     help="Restrict to these task IDs (default: all tasks in data-dir)")
-    ap.add_argument("--seed",       type=int, default=42,
+    ap.add_argument("--seed",        type=int, default=42,
                     help="RNG seed for attempt_1 TTA (default: 42)")
-    ap.add_argument("--seed2",      type=int, default=137,
+    ap.add_argument("--seed2",       type=int, default=137,
                     help="RNG seed for attempt_2 TTA (default: 137)")
+    ap.add_argument("--ttt-steps",   type=int, default=0,
+                    help="TTT fine-tuning steps per task (0=disabled, ~100 recommended). "
+                         "Fine-tunes on all training pairs before TTA decoding.")
+    ap.add_argument("--ttt-lr",      type=float, default=1e-4,
+                    help="Learning rate for TTT fine-tuning (default: 1e-4)")
+    ap.add_argument("--cache-file",  default=None,
+                    help="JSON file to cache completed task results for resume across "
+                         "sessions (default: none). Skips already-completed tasks on restart.")
     ap.add_argument("--output-file", default=None,
                     help="Output JSON path (default: results/submission_{ckpt_stem}.json)")
-    ap.add_argument("--verbose",    action="store_true")
+    ap.add_argument("--verbose",     action="store_true")
     args = ap.parse_args()
 
     device = (torch.device("mps")  if torch.backends.mps.is_available() else
@@ -199,8 +238,6 @@ def main():
     # Load checkpoint
     model, saved_args, ckpt_ids = load_checkpoint(args.checkpoint, device)
     tok  = ArcTokenizer()
-    rng1 = np.random.default_rng(args.seed)
-    rng2 = np.random.default_rng(args.seed2)
 
     # Load tasks
     data_dir = Path(args.data_dir)
@@ -218,27 +255,65 @@ def main():
         t["task_id"] = p.stem
         tasks.append(t)
 
+    # Load cache (previously completed results)
+    cache_path = Path(args.cache_file) if args.cache_file else None
+    cache: dict[str, dict] = {}
+    if cache_path and cache_path.exists():
+        cache = json.loads(cache_path.read_text())
+        print(f"Cache: {len(cache)} tasks already completed (loaded from {cache_path})")
+
+    ttt_tag = f"  ttt_steps={args.ttt_steps}  ttt_lr={args.ttt_lr}" if args.ttt_steps else ""
     print(f"Tasks: {len(tasks)}  |  n_perms={args.n_perms}  n_d4={args.n_d4}  "
-          f"k_ctx={args.k_context}")
+          f"k_ctx={args.k_context}{ttt_tag}")
     print(f"Checkpoint: {Path(args.checkpoint).name}")
+    n_cached   = sum(1 for t in tasks if t["task_id"] in cache)
+    n_remaining = len(tasks) - n_cached
+    print(f"Cached: {n_cached}  Remaining: {n_remaining}")
     print("=" * 60)
 
-    # Run inference
-    submission: dict[str, dict] = {}
-    results = []
+    results = list(cache.values())
     t0 = time.time()
+    n_done = 0
 
     for task in tasks:
+        tid = task["task_id"]
+        if tid in cache:
+            continue  # already done
+
+        rng1 = np.random.default_rng(args.seed)
+        rng2 = np.random.default_rng(args.seed2)
+
         r = predict_task(
             task, model, tok,
             n_perms=args.n_perms, n_d4=args.n_d4, k_ctx=args.k_context,
-            device=device, rng1=rng1, rng2=rng2, verbose=args.verbose,
+            device=device, rng1=rng1, rng2=rng2,
+            ttt_steps=args.ttt_steps, ttt_lr=args.ttt_lr,
+            verbose=args.verbose,
         )
         results.append(r)
+        n_done += 1
+
+        # Write to cache immediately
+        if cache_path:
+            cache[tid] = r
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(cache))
+
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-        # Build submission entry (one prediction per test pair)
+        if args.verbose and n_done % 10 == 0:
+            elapsed = time.time() - t0
+            rate    = elapsed / n_done
+            remaining = (n_remaining - n_done) * rate
+            print(f"  [{n_done}/{n_remaining}]  {rate:.1f}s/task  "
+                  f"ETA {remaining/3600:.1f}h")
+
+    elapsed = time.time() - t0
+
+    # Build submission JSON from all results (cached + new)
+    submission: dict[str, dict] = {}
+    for r in results:
         tid = r["task_id"]
         submission[tid] = {}
         for i, (a1, a2) in enumerate(zip(r["attempt_1"], r["attempt_2"])):
@@ -246,33 +321,25 @@ def main():
                 submission[tid]["attempt_1"] = a1
                 submission[tid]["attempt_2"] = a2
             else:
-                # Multiple test pairs: Kaggle format uses attempt_1/attempt_2 per pair
-                # For tasks with >1 test pair, append extra keys
                 submission[tid][f"attempt_1_{i+1}"] = a1
                 submission[tid][f"attempt_2_{i+1}"] = a2
 
-    elapsed = time.time() - t0
-
-    # Accuracy summary (only meaningful when ground truth is available)
-    has_gt    = [r for r in results if r["has_ground_truth"]]
-    n_gt      = len(has_gt)
-    exact1    = sum(r["correct_1"] for r in has_gt)
-    exact2    = sum(r["correct_2"] for r in has_gt)
-    n_fired   = sum(1 for r in results if r["rule_fired"])
-    n_test_total = sum(r["n_test"] for r in results)
-
-    # Per-task exact: task is correct if ALL test pairs correct
+    # Accuracy summary
+    has_gt       = [r for r in results if r["has_ground_truth"]]
+    n_gt         = len(has_gt)
+    n_fired      = sum(1 for r in results if r["rule_fired"])
     tasks_exact1 = sum(1 for r in has_gt if r["correct_1"] == r["n_test"] and r["n_test"] > 0)
     tasks_exact2 = sum(1 for r in has_gt if r["correct_2"] == r["n_test"] and r["n_test"] > 0)
-    # At least one attempt correct
     tasks_either = sum(1 for r in has_gt
                        if (r["correct_1"] == r["n_test"] or r["correct_2"] == r["n_test"])
                        and r["n_test"] > 0)
 
-    print(f"\nTime: {elapsed:.0f}s  ({elapsed/len(tasks):.1f}s/task)")
-    print(f"Rule-based fired: {n_fired}/{len(tasks)}")
+    if n_done > 0:
+        print(f"\nNew tasks this session: {n_done}  ({elapsed/max(n_done,1):.1f}s/task)")
+    print(f"Total tasks in submission: {len(results)}")
+    print(f"Rule-based fired: {n_fired}/{len(results)}")
     if n_gt > 0:
-        print(f"\n--- Accuracy (ground truth available for {n_gt}/{len(tasks)} tasks) ---")
+        print(f"\n--- Accuracy (ground truth available for {n_gt}/{len(results)} tasks) ---")
         print(f"  Attempt 1:      {tasks_exact1}/{n_gt} tasks exact  "
               f"({100*tasks_exact1/n_gt:.1f}%)")
         print(f"  Attempt 2:      {tasks_exact2}/{n_gt} tasks exact  "

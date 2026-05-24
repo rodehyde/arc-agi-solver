@@ -655,15 +655,24 @@ def ttt_decode(
     k_ctx:       int = 3,
     batch_size:  int = 8,
     eval_every:  int = 5,
-    n_d4:          int = 8,
-    patience:      int = 5,
-    verbose:       bool = False,
-    freeze_layers: int = 9,
+    n_d4:            int  = 8,
+    patience:        int  = 5,
+    verbose:         bool = False,
+    freeze_layers:   int  = 9,
+    use_all_pairs:   bool = False,
+    fixed_schedule:  bool = False,
 ) -> np.ndarray:
-    """Fine-tune on available context pairs, then run TTA for the prediction."""
+    """Fine-tune on available context pairs, then run TTA for the prediction.
+
+    For TTT-for-test (submission) use use_all_pairs=True, fixed_schedule=True:
+    trains on all N task pairs with augmentation for exactly n_steps, then decodes.
+    For LOO evaluation use defaults (use_all_pairs=False, fixed_schedule=False).
+    """
     ttt = ttt_fine_tune(model, tok, ctx_raw, n_steps, lr, device, rng,
                         k_ctx, batch_size, eval_every, patience, verbose,
-                        freeze_layers=freeze_layers)
+                        freeze_layers=freeze_layers,
+                        use_all_pairs=use_all_pairs,
+                        fixed_schedule=fixed_schedule)
     ctx = [(np.array(p["input"],  dtype=np.uint8),
             np.array(p["output"], dtype=np.uint8))
            for p in ctx_raw[:k_ctx]]

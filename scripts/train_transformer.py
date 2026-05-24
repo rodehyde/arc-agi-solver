@@ -44,6 +44,7 @@ from src.transformer_model import ArcTransformer
 
 PROJECT_ROOT    = Path(__file__).parent.parent
 RE_ARC_DIR      = PROJECT_ROOT / "data" / "re_arc"
+ARC_EXTRA_DIR   = PROJECT_ROOT / "data" / "arc_extra"
 TOKENIZED_DIR   = PROJECT_ROOT / "data" / "tokenized"
 ARC_TRAINING_DIR = PROJECT_ROOT / "data" / "training"
 BARC_DIR        = PROJECT_ROOT / "data" / "barc"
@@ -85,14 +86,35 @@ def get_category_task_ids(category: str) -> list[str]:
     return task_ids
 
 
-def load_task_examples(task_id: str) -> dict:
-    path = RE_ARC_DIR / f"{task_id}.json"
-    raw = json.load(open(path))
-    examples = [
-        {"input":  np.array(e["input"],  dtype=np.uint8),
-         "output": np.array(e["output"], dtype=np.uint8)}
-        for e in raw
-    ]
+def load_task_examples(task_id: str, extra_dir: Path | None = None) -> dict:
+    """Load synthetic examples for one task.
+
+    Reads from RE_ARC_DIR.  If extra_dir is given and a matching file exists
+    there, those examples are appended before splitting into train/val pools.
+    When extra data is added the combined list is shuffled (fixed per-task seed)
+    so extra examples are distributed across the train pool, not just the tail.
+    All examples are pooled for random sampling — no LOO.
+    """
+    def _read(path: Path) -> list[dict]:
+        raw = json.load(open(path))
+        return [
+            {"input":  np.array(e["input"],  dtype=np.uint8),
+             "output": np.array(e["output"], dtype=np.uint8)}
+            for e in raw
+        ]
+
+    examples = _read(RE_ARC_DIR / f"{task_id}.json")
+    if extra_dir is not None:
+        extra_path = extra_dir / f"{task_id}.json"
+        if extra_path.exists():
+            extra = _read(extra_path)
+            examples = examples + extra
+            # Shuffle so extra examples are distributed into the train pool
+            # (not buried past the N_TRAIN cap).  Fixed seed per task_id.
+            import random as _random
+            _rng = _random.Random(int(task_id, 16) & 0xFFFFFFFF)
+            _rng.shuffle(examples)
+
     return {"train": examples[:N_TRAIN], "val": examples[N_TRAIN:]}
 
 
@@ -641,10 +663,11 @@ def main():
                         help="Task IDs from the val split to use for ARC-based validation. "
                              "If provided, leave-one-out exact match on original ARC pairs "
                              "replaces RE-ARC val loss as the checkpoint criterion.")
-    parser.add_argument("--data-source", default="rearc", choices=["rearc", "arc"],
+    parser.add_argument("--data-source", default="rearc", choices=["rearc", "arc", "combined"],
                         help="Training data source: 'rearc' (default) uses RE-ARC synthetic "
                              "examples; 'arc' uses original ARC training pairs with LOO + "
-                             "D4/colour augmentation.")
+                             "D4/colour augmentation; 'combined' pools RE-ARC + data/arc_extra/ "
+                             "examples for random sampling (no LOO).")
     parser.add_argument("--n-barc", type=int, default=0,
                         help="Number of BARC synthetic tasks to add to the training pool from "
                              "data/barc/ (0=disabled).  Tasks are taken in sorted filename "
@@ -741,18 +764,39 @@ def main():
             args.val_arc_task_ids = arc_only_ids
             print(f"  ARC mode: using {len(arc_only_ids)} ARC task(s) for test-pair validation")
     else:
-        print("  Loading RE-ARC examples...", end=" ", flush=True)
-        task_data = [load_task_examples(tid) for tid in task_ids]
+        if args.data_source == "combined":
+            extra_dir = ARC_EXTRA_DIR if ARC_EXTRA_DIR.exists() else None
+            if extra_dir is None:
+                print("  WARNING: data/arc_extra/ not found — falling back to RE-ARC only")
+            else:
+                n_extra = sum(1 for tid in task_ids if (extra_dir / f"{tid}.json").exists())
+                print(f"  Loading RE-ARC + arc_extra examples "
+                      f"({n_extra}/{T} tasks have extra data)...", end=" ", flush=True)
+        else:
+            extra_dir = None
+            print("  Loading RE-ARC examples...", end=" ", flush=True)
+
+        task_data = [load_task_examples(tid, extra_dir) for tid in task_ids]
         print("done")
+
+        if args.data_source == "combined":
+            pool_sizes = [len(td["train"]) + len(td["val"]) for td in task_data]
+            print(f"  Pool size per task — min: {min(pool_sizes)}  "
+                  f"max: {max(pool_sizes)}  mean: {sum(pool_sizes)/len(pool_sizes):.0f}")
+
         arc_data = None
 
-        # Load pre-tokenized pair arrays if available (None for tasks that are missing)
-        pretok_data: list[dict | None] = [load_pretokenized(tid) for tid in task_ids]
-        n_pretok = sum(1 for p in pretok_data if p is not None)
-        if n_pretok > 0:
-            print(f"  Pre-tokenized cache: {n_pretok}/{T} tasks (fast path active)")
+        # Pre-tokenized cache only valid for plain rearc (not combined — pool differs)
+        if args.data_source == "rearc":
+            pretok_data: list[dict | None] = [load_pretokenized(tid) for tid in task_ids]
+            n_pretok = sum(1 for p in pretok_data if p is not None)
+            if n_pretok > 0:
+                print(f"  Pre-tokenized cache: {n_pretok}/{T} tasks (fast path active)")
+            else:
+                print("  Pre-tokenized cache: none found — using live tokenization")
         else:
-            print("  Pre-tokenized cache: none found — using live tokenization")
+            pretok_data = None
+            print("  Pre-tokenized cache: disabled (combined mode uses live tokenization)")
 
         # Quick sequence length check on first task
         ex = task_data[0]["train"]

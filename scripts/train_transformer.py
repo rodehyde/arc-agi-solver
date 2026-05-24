@@ -955,7 +955,7 @@ def main():
             if improved:
                 best_val_loss = arc_acc if args.val_arc_task_ids else mean_v_loss
                 no_improve = 0
-                p_best = CKPT_DIR / f"transformer_c{run_tag}_best.pt"
+                p_best = CKPT_DIR / f"transformer_{run_tag}_best.pt"
                 torch.save({
                     "epoch": epoch,
                     "model": model.state_dict(),
@@ -986,7 +986,7 @@ def main():
                 break
 
         if (epoch + 1) % args.save_every == 0:
-            p = CKPT_DIR / f"transformer_c{run_tag}_epoch_{epoch+1:04d}.pt"
+            p = CKPT_DIR / f"transformer_{run_tag}_epoch_{epoch+1:04d}.pt"
             torch.save({
                 "epoch": epoch,
                 "model": model.state_dict(),
@@ -999,7 +999,7 @@ def main():
             }, p)
             print(f"  Checkpoint: {p}")
 
-    p = CKPT_DIR / f"transformer_c{run_tag}_final.pt"
+    p = CKPT_DIR / f"transformer_{run_tag}_final.pt"
     torch.save({
         "epoch": epoch,
         "model": model.state_dict(),

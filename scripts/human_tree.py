@@ -361,6 +361,34 @@ def is_tile_reflect_4(task):
     return _is_2x2_transform_tile(task, _REFLECT_4_FNS)
 
 
+# ── Self-tiling ───────────────────────────────────────────────────────────────
+
+def is_self_tile(task):
+    """True iff the input is a square N×N grid and the output is N²×N²,
+    where each N×N block of the output is either a copy of the input
+    (when the corresponding input cell is non-zero) or all zeros
+    (when the corresponding input cell is zero).
+
+    Generalises naturally to any square size, though 3×3→9×9 is most common.
+    """
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        H, W = inp.shape
+        if H != W:
+            return False                        # input must be square
+        N = H
+        if out.shape != (N * N, N * N):
+            return False
+        zeros_block = np.zeros((N, N), dtype=np.uint8)
+        for i in range(N):
+            for j in range(N):
+                block = out[i * N:(i + 1) * N, j * N:(j + 1) * N]
+                expected = inp if inp[i, j] != 0 else zeros_block
+                if not np.array_equal(block, expected):
+                    return False
+    return True
+
+
 # ── Decision tree ─────────────────────────────────────────────────────────────
 
 def classify(task, trace=False):
@@ -430,6 +458,10 @@ def classify(task, trace=False):
     if output_is_multiple_of_input(task):
         say("output_is_multiple=YES")
 
+        if is_self_tile(task):
+            say("is_self_tile=YES  →  SELF_TILE")
+            return "SELF_TILE"
+
         if is_tile_rotate_4(task):
             say("is_tile_rotate_4=YES  →  TILE_ROTATE_4")
             return "TILE_ROTATE_4"
@@ -496,7 +528,7 @@ CLASSIFIED_LABELS = {
     "COLOUR_BY_HEIGHT", "COLOUR_BETWEEN_PAIRS",
     "FILL_REGIONS", "SAME_SIZE_NEW_COLOURS", "FILL_WITH_SHAPE",
     "REFLECT", "ROTATE",
-    "TILE_ROTATE_4", "TILE_REFLECT_4",
+    "TILE_ROTATE_4", "TILE_REFLECT_4", "SELF_TILE",
     "MOVE_TO_STATIC", "MOVE_PART",
     "COLOUR_REMOVAL", "COLOUR_SUBSTITUTION",
     "TILE_ASSEMBLY",

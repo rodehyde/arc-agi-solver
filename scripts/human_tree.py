@@ -266,6 +266,44 @@ def has_unique_colour_shape(task):
     return False
 
 
+# ── Geometric transforms ───────────────────────────────────────────────────────
+
+def _consistent_transform(task, fn):
+    """True iff applying fn to every training input produces the corresponding output exactly."""
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        try:
+            t = fn(inp)
+        except Exception:
+            return False
+        if t.shape != out.shape:
+            return False
+        if not np.array_equal(t, out):
+            return False
+    return True
+
+
+def is_reflection(task):
+    """True iff one consistent reflection (H, V, main-diagonal, anti-diagonal)
+    maps every training input to its output."""
+    return (
+        _consistent_transform(task, np.flipud)                          # top ↔ bottom
+        or _consistent_transform(task, np.fliplr)                      # left ↔ right
+        or _consistent_transform(task, lambda g: g.T)                  # main diagonal
+        or _consistent_transform(task, lambda g: np.flip(g.T, (0, 1)))# anti-diagonal
+    )
+
+
+def is_rotation(task):
+    """True iff one consistent rotation (90°, 180°, 270° CCW) maps every
+    training input to its output."""
+    return (
+        _consistent_transform(task, lambda g: np.rot90(g, 1))  # 90° CCW
+        or _consistent_transform(task, lambda g: np.rot90(g, 2))  # 180°
+        or _consistent_transform(task, lambda g: np.rot90(g, 3))  # 270° CCW
+    )
+
+
 # ── Decision tree ─────────────────────────────────────────────────────────────
 
 def classify(task, trace=False):
@@ -301,6 +339,14 @@ def classify(task, trace=False):
                     return "FILL_REGIONS"
                 say("cells_fill_enclosed_interior=NO  →  SAME_SIZE_NEW_COLOURS")
                 return "SAME_SIZE_NEW_COLOURS"
+
+            if is_reflection(task):
+                say("is_reflection=YES  →  REFLECT")
+                return "REFLECT"
+
+            if is_rotation(task):
+                say("is_rotation=YES  →  ROTATE")
+                return "ROTATE"
 
             n = n_shapes_in_input(task)
             say(f"n_shapes={n}")
@@ -382,6 +428,7 @@ CLASSIFIED_LABELS = {
     "SINGLE_CELL_OUTPUT",
     "COLOUR_BY_HEIGHT", "COLOUR_BETWEEN_PAIRS",
     "FILL_REGIONS", "SAME_SIZE_NEW_COLOURS", "FILL_WITH_SHAPE",
+    "REFLECT", "ROTATE",
     "MOVE_TO_STATIC", "MOVE_PART",
     "COLOUR_REMOVAL", "COLOUR_SUBSTITUTION",
     "TILE_ASSEMBLY",

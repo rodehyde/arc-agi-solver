@@ -197,6 +197,63 @@ def output_grows_in_free_dim(task):
     return all(results) if results else False
 
 
+def cells_fill_enclosed_interior(task):
+    """True iff:
+      - in every training pair, the zero-cells filled in the output are exactly
+        those NOT reachable from the grid border (i.e. enclosed zeros), AND
+      - at least one pair actually has enclosed zeros that get filled.
+
+    This is the defining property of a genuine flood-fill-enclosed task.
+    """
+    any_fill = False
+
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        if inp.shape != out.shape:
+            return False
+
+        rows, cols = inp.shape
+        reachable = np.zeros((rows, cols), dtype=bool)
+
+        # BFS from every border zero
+        queue = []
+        for r in range(rows):
+            for c in (0, cols - 1):
+                if inp[r, c] == 0 and not reachable[r, c]:
+                    reachable[r, c] = True
+                    queue.append((r, c))
+        for c in range(cols):
+            for r in (0, rows - 1):
+                if inp[r, c] == 0 and not reachable[r, c]:
+                    reachable[r, c] = True
+                    queue.append((r, c))
+
+        head = 0
+        while head < len(queue):
+            r, c = queue[head]; head += 1
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols and not reachable[nr, nc] and inp[nr, nc] == 0:
+                    reachable[nr, nc] = True
+                    queue.append((nr, nc))
+
+        interior = (inp == 0) & ~reachable          # zeros not reachable from border
+        filled   = (inp == 0) & (out != 0)          # zeros that got coloured
+
+        # Any non-zero cell that changed colour means this is NOT a pure zero-fill task
+        recoloured = (inp != 0) & (out != 0) & (inp != out)
+        if recoloured.any():
+            return False
+
+        if not np.array_equal(filled, interior):
+            return False                             # mismatch → not a pure enclosed fill
+
+        if interior.any():
+            any_fill = True
+
+    return any_fill   # must have at least one pair with genuine enclosed fill
+
+
 def has_unique_colour_shape(task):
     """At least one shape whose colour appears in exactly one connected component in the input."""
     for p in task["train"]:
@@ -238,8 +295,12 @@ def classify(task, trace=False):
             say("no_colours_lost=YES")
 
             if has_new_colours(task):
-                say("has_new_colours=YES  →  FILL_REGIONS")
-                return "FILL_REGIONS"
+                say("has_new_colours=YES")
+                if cells_fill_enclosed_interior(task):
+                    say("cells_fill_enclosed_interior=YES  →  FILL_REGIONS")
+                    return "FILL_REGIONS"
+                say("cells_fill_enclosed_interior=NO  →  SAME_SIZE_NEW_COLOURS")
+                return "SAME_SIZE_NEW_COLOURS"
 
             n = n_shapes_in_input(task)
             say(f"n_shapes={n}")
@@ -320,7 +381,7 @@ def classify(task, trace=False):
 CLASSIFIED_LABELS = {
     "SINGLE_CELL_OUTPUT",
     "COLOUR_BY_HEIGHT", "COLOUR_BETWEEN_PAIRS",
-    "FILL_REGIONS", "FILL_WITH_SHAPE",
+    "FILL_REGIONS", "SAME_SIZE_NEW_COLOURS", "FILL_WITH_SHAPE",
     "MOVE_TO_STATIC", "MOVE_PART",
     "COLOUR_REMOVAL", "COLOUR_SUBSTITUTION",
     "TILE_ASSEMBLY",

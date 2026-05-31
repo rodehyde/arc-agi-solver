@@ -42,6 +42,10 @@ def load_task(task_id: str) -> dict:
 def same_size(task):
     return all(p["input"].shape == p["output"].shape for p in task["train"])
 
+def is_identity(task):
+    """True iff input equals output exactly in every training pair."""
+    return all(np.array_equal(p["input"], p["output"]) for p in task["train"])
+
 def output_is_single_cell(task):
     return all(p["output"].shape == (1, 1) for p in task["train"])
 
@@ -406,6 +410,10 @@ def classify(task, trace=False):
     if same_size(task):
         say("same_size=YES")
 
+        if is_identity(task):
+            say("is_identity=YES  →  IDENTITY")
+            return "IDENTITY"
+
         if input_is_monochrome(task) and input_cells_are_columns(task) and has_new_colours(task):
             say("monochrome_columns + new_colours  →  COLOUR_BY_HEIGHT")
             return "COLOUR_BY_HEIGHT"
@@ -527,6 +535,7 @@ CLASSIFIED_LABELS = {
     "SINGLE_CELL_OUTPUT",
     "COLOUR_BY_HEIGHT", "COLOUR_BETWEEN_PAIRS",
     "FILL_REGIONS", "SAME_SIZE_NEW_COLOURS", "FILL_WITH_SHAPE",
+    "IDENTITY",
     "REFLECT", "ROTATE",
     "TILE_ROTATE_4", "TILE_REFLECT_4", "SELF_TILE",
     "MOVE_TO_STATIC", "MOVE_PART",

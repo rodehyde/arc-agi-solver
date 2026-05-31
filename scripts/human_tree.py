@@ -391,6 +391,40 @@ def is_zoom(task):
     return True
 
 
+# ── Count-fill: N copies in first N block slots ───────────────────────────────
+
+def is_count_fill(task):
+    """True iff:
+      - the output is a multiple of the input in both dimensions, and
+      - N = number of nonzero cells in the input, and
+      - the output is filled with exactly N copies of the input placed in the
+        first N block positions (scanning left-to-right, top-to-bottom),
+        with all remaining block positions empty.
+
+    The output canvas size may vary across training pairs.
+    """
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        H, W = inp.shape
+        oh, ow = out.shape
+        if oh % H != 0 or ow % W != 0:
+            return False
+        rows_b, cols_b = oh // H, ow // W
+        N = int(np.sum(inp != 0))
+        if N == 0 or N > rows_b * cols_b:
+            return False
+        for k in range(rows_b * cols_b):
+            bi, bj = divmod(k, cols_b)
+            block = out[bi * H:(bi + 1) * H, bj * W:(bj + 1) * W]
+            if k < N:
+                if not np.array_equal(block, inp):
+                    return False
+            else:
+                if not np.all(block == 0):
+                    return False
+    return True
+
+
 # ── Self-tiling ───────────────────────────────────────────────────────────────
 
 def is_self_tile(task):
@@ -496,6 +530,10 @@ def classify(task, trace=False):
             say("is_zoom=YES  →  ZOOM")
             return "ZOOM"
 
+        if is_count_fill(task):
+            say("is_count_fill=YES  →  COUNT_FILL")
+            return "COUNT_FILL"
+
         if is_self_tile(task):
             say("is_self_tile=YES  →  SELF_TILE")
             return "SELF_TILE"
@@ -567,7 +605,7 @@ CLASSIFIED_LABELS = {
     "FILL_REGIONS", "SAME_SIZE_NEW_COLOURS", "FILL_WITH_SHAPE",
     "IDENTITY",
     "REFLECT", "ROTATE",
-    "TILE_ROTATE_4", "TILE_REFLECT_4", "SELF_TILE", "ZOOM",
+    "TILE_ROTATE_4", "TILE_REFLECT_4", "SELF_TILE", "ZOOM", "COUNT_FILL",
     "MOVE_TO_STATIC", "MOVE_PART",
     "COLOUR_REMOVAL", "COLOUR_SUBSTITUTION",
     "TILE_ASSEMBLY",

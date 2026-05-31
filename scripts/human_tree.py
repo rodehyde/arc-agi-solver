@@ -365,6 +365,32 @@ def is_tile_reflect_4(task):
     return _is_2x2_transform_tile(task, _REFLECT_4_FNS)
 
 
+# ── Pixel zoom (each cell → solid block of its colour) ───────────────────────
+
+def is_zoom(task):
+    """True iff the output is a scaled-up version of the input where every cell
+    becomes a solid rectangular block filled with that cell's colour.
+
+    The scale factor must be uniform within a pair (same H and W multiplier)
+    but may vary across pairs.
+    """
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        hi, wi = inp.shape
+        ho, wo = out.shape
+        if ho % hi != 0 or wo % wi != 0:
+            return False
+        sh, sw = ho // hi, wo // wi
+        if sh != sw or sh < 2:
+            return False
+        for i in range(hi):
+            for j in range(wi):
+                block = out[i * sh:(i + 1) * sh, j * sw:(j + 1) * sw]
+                if not np.all(block == inp[i, j]):
+                    return False
+    return True
+
+
 # ── Self-tiling ───────────────────────────────────────────────────────────────
 
 def is_self_tile(task):
@@ -466,6 +492,10 @@ def classify(task, trace=False):
     if output_is_multiple_of_input(task):
         say("output_is_multiple=YES")
 
+        if is_zoom(task):
+            say("is_zoom=YES  →  ZOOM")
+            return "ZOOM"
+
         if is_self_tile(task):
             say("is_self_tile=YES  →  SELF_TILE")
             return "SELF_TILE"
@@ -537,7 +567,7 @@ CLASSIFIED_LABELS = {
     "FILL_REGIONS", "SAME_SIZE_NEW_COLOURS", "FILL_WITH_SHAPE",
     "IDENTITY",
     "REFLECT", "ROTATE",
-    "TILE_ROTATE_4", "TILE_REFLECT_4", "SELF_TILE",
+    "TILE_ROTATE_4", "TILE_REFLECT_4", "SELF_TILE", "ZOOM",
     "MOVE_TO_STATIC", "MOVE_PART",
     "COLOUR_REMOVAL", "COLOUR_SUBSTITUTION",
     "TILE_ASSEMBLY",

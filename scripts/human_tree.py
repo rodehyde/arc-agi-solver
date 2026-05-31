@@ -16,6 +16,7 @@ import argparse
 import json
 import numpy as np
 from collections import defaultdict
+from itertools import permutations as _permutations
 from pathlib import Path
 from scipy import ndimage
 
@@ -304,6 +305,62 @@ def is_rotation(task):
     )
 
 
+# ── 2×2 tiled output from transforms ─────────────────────────────────────────
+
+def _is_2x2_transform_tile(task, transforms):
+    """True iff the output is a 2×2 tiling of the input using some consistent
+    permutation of the 4 given transforms, for every training pair.
+
+    Tries all 24 orderings of the 4 quadrant positions so the task doesn't
+    need to use a specific layout.
+    """
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        H, W = inp.shape
+        if out.shape != (2 * H, 2 * W):
+            return False
+        quadrants = [out[r * H:(r + 1) * H, c * W:(c + 1) * W]
+                     for r in range(2) for c in range(2)]
+        matched = False
+        for perm in _permutations(transforms):
+            try:
+                if all(np.array_equal(fn(inp), q)
+                       for fn, q in zip(perm, quadrants)):
+                    matched = True
+                    break
+            except Exception:
+                pass
+        if not matched:
+            return False
+    return True
+
+
+_ROTATE_4_FNS = (
+    lambda g: g,
+    lambda g: np.rot90(g, 1),
+    lambda g: np.rot90(g, 2),
+    lambda g: np.rot90(g, 3),
+)
+
+_REFLECT_4_FNS = (
+    lambda g: g,
+    np.fliplr,
+    np.flipud,
+    lambda g: np.flip(g, (0, 1)),   # flip both axes (= 180° rotation)
+)
+
+
+def is_tile_rotate_4(task):
+    """True iff the output is a 2×2 grid containing the input at 0°, 90°, 180°, 270°."""
+    return _is_2x2_transform_tile(task, _ROTATE_4_FNS)
+
+
+def is_tile_reflect_4(task):
+    """True iff the output is a 2×2 grid containing the input, its left-right mirror,
+    its top-bottom mirror, and both mirrors combined."""
+    return _is_2x2_transform_tile(task, _REFLECT_4_FNS)
+
+
 # ── Decision tree ─────────────────────────────────────────────────────────────
 
 def classify(task, trace=False):
@@ -371,7 +428,17 @@ def classify(task, trace=False):
 
     # ── Output is integer multiple of input ───────────────────────────────────
     if output_is_multiple_of_input(task):
-        say("output_is_multiple=YES  →  TILE_ASSEMBLY")
+        say("output_is_multiple=YES")
+
+        if is_tile_rotate_4(task):
+            say("is_tile_rotate_4=YES  →  TILE_ROTATE_4")
+            return "TILE_ROTATE_4"
+
+        if is_tile_reflect_4(task):
+            say("is_tile_reflect_4=YES  →  TILE_REFLECT_4")
+            return "TILE_REFLECT_4"
+
+        say("→  TILE_ASSEMBLY")
         return "TILE_ASSEMBLY"
 
     # ── One dimension shared between input and output ─────────────────────────
@@ -429,6 +496,7 @@ CLASSIFIED_LABELS = {
     "COLOUR_BY_HEIGHT", "COLOUR_BETWEEN_PAIRS",
     "FILL_REGIONS", "SAME_SIZE_NEW_COLOURS", "FILL_WITH_SHAPE",
     "REFLECT", "ROTATE",
+    "TILE_ROTATE_4", "TILE_REFLECT_4",
     "MOVE_TO_STATIC", "MOVE_PART",
     "COLOUR_REMOVAL", "COLOUR_SUBSTITUTION",
     "TILE_ASSEMBLY",

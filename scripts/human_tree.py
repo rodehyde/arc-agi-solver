@@ -475,6 +475,239 @@ def is_single_shape_sparse(task):
     return True
 
 
+# ── EXTRACT_UNIQUE_SHAPE sub-categories (continued) ───────────────────────────
+
+def _shape_pattern(grid, colour):
+    """Return binary mask of colour cells in their minimal bounding box."""
+    rows, cols = np.where(grid == colour)
+    if len(rows) == 0:
+        return None
+    rmin, rmax = rows.min(), rows.max()
+    cmin, cmax = cols.min(), cols.max()
+    return (grid[rmin:rmax+1, cmin:cmax+1] == colour)
+
+
+def is_jigsaw_fill_rect(task):
+    """Exactly two colours in input, each one 4-connected component.
+    Together their cells exactly fill the output rectangle (no zeros in output).
+    The shape pattern of each colour matches between input and output."""
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        colours = [int(c) for c in np.unique(inp) if c != 0]
+        if len(colours) != 2:
+            return False
+        c0, c1 = colours[0], colours[1]
+        for col in [c0, c1]:
+            _, n = ndimage.label(inp == col)
+            if n != 1:
+                return False
+        n0 = int(np.sum(inp == c0))
+        n1 = int(np.sum(inp == c1))
+        if n0 + n1 != out.size:
+            return False
+        if np.any(out == 0):
+            return False
+        if set(int(c) for c in np.unique(out)) != {c0, c1}:
+            return False
+        if int(np.sum(out == c0)) != n0 or int(np.sum(out == c1)) != n1:
+            return False
+        in_s0 = _shape_pattern(inp, c0)
+        in_s1 = _shape_pattern(inp, c1)
+        out_s0 = _shape_pattern(out, c0)
+        out_s1 = _shape_pattern(out, c1)
+        if any(s is None for s in [in_s0, in_s1, out_s0, out_s1]):
+            return False
+        if not np.array_equal(in_s0, out_s0) or not np.array_equal(in_s1, out_s1):
+            return False
+    return True
+
+
+def _get_block_colours(inp):
+    """If input is a uniform-block grid separated by all-zero rows and columns,
+    return a flat list of block colours (one per block slot); else return None."""
+    h, w = inp.shape
+    zero_rows = {r for r in range(h) if np.all(inp[r] == 0)}
+    zero_cols = {c for c in range(w) if np.all(inp[:, c] == 0)}
+    if not zero_rows or not zero_cols:
+        return None
+
+    def _groups(n, zero_set):
+        groups = []
+        i = 0
+        while i < n:
+            if i not in zero_set:
+                s = i
+                while i < n and i not in zero_set:
+                    i += 1
+                groups.append((s, i - 1))
+            else:
+                i += 1
+        return groups
+
+    block_rows = _groups(h, zero_rows)
+    block_cols = _groups(w, zero_cols)
+    if len(block_rows) < 2 or len(block_cols) < 2:
+        return None
+    colours = []
+    for rs, re in block_rows:
+        for cs, ce in block_cols:
+            block = inp[rs:re+1, cs:ce+1]
+            uniq = np.unique(block)
+            if len(uniq) != 1:
+                return None
+            colours.append(int(uniq[0]))
+    return colours
+
+
+def is_block_grid_rank(task):
+    """Grid of uniform blocks separated by all-zero rows and columns.
+    Count blocks per colour; discard the most-common colour;
+    output = remaining colours as a single column, sorted by count descending."""
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        blocks = _get_block_colours(inp)
+        if blocks is None:
+            return False
+        cols_arr, cnts_arr = np.unique(blocks, return_counts=True)
+        colour_counts = dict(zip(cols_arr.tolist(), cnts_arr.tolist()))
+        if len(colour_counts) < 2:
+            return False
+        most_common = max(colour_counts, key=colour_counts.get)
+        remaining = {c: n for c, n in colour_counts.items() if c != most_common}
+        if not remaining:
+            return False
+        sorted_remaining = sorted(remaining.items(), key=lambda x: -x[1])
+        expected_colours = [c for c, _ in sorted_remaining]
+        if out.shape != (len(expected_colours), 1):
+            return False
+        expected = np.array(expected_colours, dtype=np.uint8).reshape(-1, 1)
+        if not np.array_equal(expected, out):
+            return False
+    return True
+
+
+def is_largest_shape_output(task):
+    """Multiple coloured shapes in sparse input.
+    Output = bounding-box crop of the shape with the most cells."""
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        comps = get_components(inp)
+        if len(comps) < 2:
+            return False
+        largest_colour, largest_mask = max(comps, key=lambda x: int(np.sum(x[1])))
+        nz = np.argwhere(largest_mask)
+        rmin, cmin = nz.min(axis=0)
+        rmax, cmax = nz.max(axis=0)
+        bbox = inp[rmin:rmax+1, cmin:cmax+1]
+        if not np.array_equal(bbox, out):
+            return False
+    return True
+
+
+def is_colour_order_by_size(task):
+    """Sparse input with multiple colours.
+    Output = K×1 column listing colours sorted by total cell count descending."""
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        if out.shape[1] != 1:
+            return False
+        colours = [int(c) for c in np.unique(inp) if c != 0]
+        if len(colours) < 2:
+            return False
+        colour_counts = sorted([(c, int(np.sum(inp == c))) for c in colours],
+                               key=lambda x: -x[1])
+        expected_colours = [c for c, _ in colour_counts]
+        if len(expected_colours) != out.shape[0]:
+            return False
+        expected = np.array(expected_colours, dtype=np.uint8).reshape(-1, 1)
+        if not np.array_equal(expected, out):
+            return False
+    return True
+
+
+def is_colour_bars_by_count(task):
+    """Dense input (no zeros). Output = H×K bar chart where H = max cell count,
+    K = number of colours. Each column is one colour, filled from the top for
+    count rows then zero. Columns sorted left-to-right by count descending."""
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        if np.any(inp == 0):
+            return False
+        colours, counts = np.unique(inp, return_counts=True)
+        order = np.argsort(-counts)
+        sorted_colours = colours[order].tolist()
+        sorted_counts = counts[order].tolist()
+        max_count = sorted_counts[0]
+        K = len(sorted_colours)
+        if out.shape != (max_count, K):
+            return False
+        for col_idx, (colour, count) in enumerate(zip(sorted_colours, sorted_counts)):
+            col = out[:, col_idx]
+            expected = np.array([colour] * count + [0] * (max_count - count),
+                                dtype=np.uint8)
+            if not np.array_equal(col, expected):
+                return False
+    return True
+
+
+def is_colour_bars_max_shapes(task):
+    """Sparse input with multiple shapes. Only shapes with the maximum cell count
+    appear in the output as solid bars. Bars sorted left-to-right by each shape's
+    leftmost column. Output height = max count, width = number of max-count shapes."""
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        comps = get_components(inp)
+        if len(comps) < 2:
+            return False
+        count_list = [(colour, mask, int(np.sum(mask))) for colour, mask in comps]
+        max_count = max(c for _, _, c in count_list)
+        max_comps = [(colour, mask) for colour, mask, cnt in count_list
+                     if cnt == max_count]
+        max_comps_sorted = sorted(max_comps,
+                                  key=lambda item: int(np.where(item[1])[1].min()))
+        K = len(max_comps_sorted)
+        if out.shape != (max_count, K):
+            return False
+        for col_idx, (colour, _) in enumerate(max_comps_sorted):
+            expected_col = np.full(max_count, colour, dtype=np.uint8)
+            if not np.array_equal(out[:, col_idx], expected_col):
+                return False
+    return True
+
+
+def is_block_count_x(task):
+    """Input contains N non-overlapping 2×2 blocks of a single colour (N ≤ 5).
+    Output is a 3×3 grid with exactly N ones placed at the X-pattern positions
+    (top-left, top-right, centre, bottom-left, bottom-right) in that order."""
+    X_ORDER = [(0, 0), (0, 2), (1, 1), (2, 0), (2, 2)]
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        nz_vals = set(inp[inp != 0].tolist())
+        if len(nz_vals) != 1:
+            return False
+        colour = list(nz_vals)[0]
+        h, w = inp.shape
+        covered = np.zeros((h, w), dtype=bool)
+        n_blocks = 0
+        for r in range(h - 1):
+            for c in range(w - 1):
+                if np.all(inp[r:r+2, c:c+2] == colour) and not covered[r, c]:
+                    covered[r:r+2, c:c+2] = True
+                    n_blocks += 1
+        if not np.all(covered == (inp == colour)):
+            return False
+        if n_blocks == 0 or n_blocks > 5:
+            return False
+        if out.shape != (3, 3):
+            return False
+        expected = np.zeros((3, 3), dtype=np.uint8)
+        for k in range(n_blocks):
+            expected[X_ORDER[k]] = 1
+        if not np.array_equal(expected, out):
+            return False
+    return True
+
+
 # ── Geometric transforms ───────────────────────────────────────────────────────
 
 def _consistent_transform(task, fn):
@@ -765,6 +998,10 @@ def classify(task, trace=False):
             say("one_vertical_bar_two_equal_halves=YES  →  AND_HALVES")
             return "AND_HALVES"
 
+        if is_colour_bars_by_count(task):
+            say("is_colour_bars_by_count=YES  →  COLOUR_BARS_BY_COUNT")
+            return "COLOUR_BARS_BY_COUNT"
+
         if output_grows_in_free_dim(task):
             say("output_grows_in_free_dim=YES  →  ONE_DIM_EXTEND")
             return "ONE_DIM_EXTEND"
@@ -798,6 +1035,34 @@ def classify(task, trace=False):
     if is_single_shape_sparse(task):
         say("is_single_shape_sparse=YES  →  SINGLE_SHAPE_EXTRACT")
         return "SINGLE_SHAPE_EXTRACT"
+
+    if is_colour_bars_by_count(task):
+        say("is_colour_bars_by_count=YES  →  COLOUR_BARS_BY_COUNT")
+        return "COLOUR_BARS_BY_COUNT"
+
+    if is_block_count_x(task):
+        say("is_block_count_x=YES  →  BLOCK_COUNT_X")
+        return "BLOCK_COUNT_X"
+
+    if is_jigsaw_fill_rect(task):
+        say("is_jigsaw_fill_rect=YES  →  JIGSAW_FILL_RECT")
+        return "JIGSAW_FILL_RECT"
+
+    if is_block_grid_rank(task):
+        say("is_block_grid_rank=YES  →  BLOCK_GRID_RANK")
+        return "BLOCK_GRID_RANK"
+
+    if is_largest_shape_output(task):
+        say("is_largest_shape_output=YES  →  LARGEST_SHAPE")
+        return "LARGEST_SHAPE"
+
+    if is_colour_order_by_size(task):
+        say("is_colour_order_by_size=YES  →  COLOUR_ORDER_BY_SIZE")
+        return "COLOUR_ORDER_BY_SIZE"
+
+    if is_colour_bars_max_shapes(task):
+        say("is_colour_bars_max_shapes=YES  →  COLOUR_BARS_MAX")
+        return "COLOUR_BARS_MAX"
 
     if has_unique_colour_shape(task):
         say("has_unique_colour_shape=YES  →  EXTRACT_UNIQUE_SHAPE")
@@ -841,6 +1106,9 @@ CLASSIFIED_LABELS = {
     "ONE_DIM_EXTEND", "ONE_DIM_CROP",
     "COLOUR_BANDS", "COMPLETE_PATTERN", "LARGEST_OUTLINE",
     "EXTRACT_RECT_INTERIOR", "ODD_CELL_RECOLOUR", "SINGLE_SHAPE_EXTRACT",
+    "BLOCK_COUNT_X", "JIGSAW_FILL_RECT", "BLOCK_GRID_RANK",
+    "LARGEST_SHAPE", "COLOUR_ORDER_BY_SIZE", "COLOUR_BARS_MAX",
+    "COLOUR_BARS_BY_COUNT",
     "EXTRACT_UNIQUE_SHAPE", "EXTRACT_OBJECT",
     "OVERLAP_OR_COUNT_SHAPES", "INPUT_FROM_OUTPUT_TRANSFORMS",
 }

@@ -271,6 +271,210 @@ def has_unique_colour_shape(task):
     return False
 
 
+# ── EXTRACT_UNIQUE_SHAPE sub-categories ───────────────────────────────────────
+
+def is_colour_bands_uniform(task):
+    """All rows uniform XOR all columns uniform; output = run-length-encoded colour sequence."""
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        if np.any(inp == 0):
+            return False
+        oh, ow = out.shape
+        if oh != 1 and ow != 1:
+            return False
+        H, W = inp.shape
+        rows_uniform = all(len(set(inp[r].tolist())) == 1 for r in range(H))
+        cols_uniform = all(len(set(inp[:, c].tolist())) == 1 for c in range(W))
+        if not rows_uniform and not cols_uniform:
+            return False
+        if rows_uniform and ow == 1:
+            seq = [int(inp[r, 0]) for r in range(H)]
+        elif cols_uniform and oh == 1:
+            seq = [int(inp[0, c]) for c in range(W)]
+        else:
+            return False
+        rle = []
+        for v in seq:
+            if not rle or rle[-1] != v:
+                rle.append(v)
+        expected = (np.array(rle).reshape(-1, 1) if ow == 1
+                    else np.array(rle).reshape(1, -1))
+        if not np.array_equal(expected, out):
+            return False
+    return True
+
+
+def is_zero_block_complete(task):
+    """Input is mostly non-zero; all zeros form a single solid rectangle.
+    Output has the same shape as that rectangle (completing the pattern)."""
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        zero_frac = np.sum(inp == 0) / inp.size
+        if zero_frac > 0.25 or zero_frac == 0:
+            return False
+        zero_rows, zero_cols = np.where(inp == 0)
+        rmin, cmin = zero_rows.min(), zero_cols.min()
+        rmax, cmax = zero_rows.max(), zero_cols.max()
+        block = inp[rmin:rmax + 1, cmin:cmax + 1]
+        if not np.all(block == 0):
+            return False          # zeros not in a solid rectangle
+        if out.shape != block.shape:
+            return False
+    return True
+
+
+def _is_hollow_rect_sparse(inp, colour):
+    """True if colour forms exactly the border of a rectangle on a zero background."""
+    rows, cols = np.where(inp == colour)
+    if len(rows) == 0:
+        return False
+    rmin, rmax = rows.min(), rows.max()
+    cmin, cmax = cols.min(), cols.max()
+    if rmax - rmin < 2 or cmax - cmin < 2:
+        return False
+    for r in range(rmin, rmax + 1):
+        for c in range(cmin, cmax + 1):
+            on_border = (r == rmin or r == rmax or c == cmin or c == cmax)
+            if on_border and inp[r, c] != colour:
+                return False
+            if not on_border and inp[r, c] != 0:
+                return False
+    return True
+
+
+def is_largest_hollow_rect(task):
+    """All non-zero components form hollow rectangular outlines on a sparse background.
+    Output is a solid block whose colour equals the colour of the largest outline."""
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        colours = [int(c) for c in np.unique(inp) if c != 0]
+        if len(colours) < 2:
+            return False
+        for colour in colours:
+            if not _is_hollow_rect_sparse(inp, colour):
+                return False
+        # Output must be a uniform solid block of one colour
+        out_vals = set(np.unique(out).tolist())
+        if len(out_vals) != 1 or list(out_vals)[0] == 0:
+            return False
+        out_colour = int(list(out_vals)[0])
+        # The output colour must be the colour of the largest outline
+        areas = {}
+        for colour in colours:
+            rows, cols = np.where(inp == colour)
+            rmin, rmax = rows.min(), rows.max()
+            cmin, cmax = cols.min(), cols.max()
+            areas[colour] = (rmax - rmin + 1) * (cmax - cmin + 1)
+        if out_colour != max(areas, key=areas.get):
+            return False
+    return True
+
+
+def is_extract_rect_interior(task):
+    """One colour in the input forms a hollow rectangular outline (border-only).
+    Output = the cells inside that rectangle."""
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        colours = [int(c) for c in np.unique(inp) if c != 0]
+        found = False
+        for colour in colours:
+            rows, cols = np.where(inp == colour)
+            if len(rows) == 0:
+                continue
+            rmin, rmax = rows.min(), rows.max()
+            cmin, cmax = cols.min(), cols.max()
+            if rmax - rmin < 2 or cmax - cmin < 2:
+                continue
+            # All top/bottom border cells must be this colour
+            if not all(inp[rmin, c] == colour for c in range(cmin, cmax + 1)):
+                continue
+            if not all(inp[rmax, c] == colour for c in range(cmin, cmax + 1)):
+                continue
+            if not all(inp[r, cmin] == colour for r in range(rmin, rmax + 1)):
+                continue
+            if not all(inp[r, cmax] == colour for r in range(rmin, rmax + 1)):
+                continue
+            # No interior cells may be this colour
+            interior = inp[rmin + 1:rmax, cmin + 1:cmax]
+            if np.any(interior == colour):
+                continue
+            if np.array_equal(interior, out):
+                found = True
+                break
+        if not found:
+            return False
+    return True
+
+
+def is_odd_cell_embedded(task):
+    """Multiple spatial clusters; exactly one cluster per pair has exactly one cell of
+    an intruder colour (different from the cluster's dominant colour).
+    Output = bounding box of that cluster with the intruder replaced by the dominant colour."""
+    intruder_colour = None
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        labeled, n = ndimage.label(inp != 0)
+        if n < 2:
+            return False
+        odd_clusters = []
+        for idx in range(1, n + 1):
+            mask = labeled == idx
+            vals = inp[mask]
+            colours, counts = np.unique(vals, return_counts=True)
+            if len(colours) <= 1:
+                continue
+            minority = [(int(c), int(cnt)) for c, cnt in zip(colours, counts) if cnt == 1]
+            if len(minority) != 1:
+                continue
+            dominant = int(colours[counts.argmax()])
+            foreign = minority[0][0]
+            odd_clusters.append((idx, dominant, foreign))
+        if len(odd_clusters) != 1:
+            return False
+        idx, dominant, foreign = odd_clusters[0]
+        if intruder_colour is None:
+            intruder_colour = foreign
+        elif intruder_colour != foreign:
+            return False
+        mask = labeled == idx
+        nz = np.argwhere(mask)
+        rmin, cmin = nz.min(axis=0)
+        rmax, cmax = nz.max(axis=0)
+        bbox = inp[rmin:rmax + 1, cmin:cmax + 1].copy()
+        bbox[bbox == foreign] = dominant
+        if not np.array_equal(bbox, out):
+            return False
+    return True
+
+
+def is_single_shape_sparse(task):
+    """Sparse input (≥60% zeros), single spatially connected non-zero cluster.
+    Output is smaller than input in both area and each dimension."""
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        if np.sum(inp == 0) / inp.size < 0.60:
+            return False
+        nz = np.argwhere(inp != 0)
+        if len(nz) == 0:
+            return False
+        struct8 = ndimage.generate_binary_structure(2, 2)
+        _, n_comps = ndimage.label(inp != 0, structure=struct8)
+        if n_comps != 1:
+            return False
+        # The largest 4-connected component must contain >50% of nonzero cells
+        # (prevents spurious single-cluster from diagonally-touching separate blobs)
+        labeled4, _ = ndimage.label(inp != 0)
+        total_nz = int(np.sum(inp != 0))
+        max_comp = max(int(np.sum(labeled4 == k)) for k in range(1, labeled4.max() + 1))
+        if max_comp / total_nz < 0.40:
+            return False
+        if out.size >= inp.size:
+            return False
+        if out.shape[0] > inp.shape[0] or out.shape[1] > inp.shape[1]:
+            return False
+    return True
+
+
 # ── Geometric transforms ───────────────────────────────────────────────────────
 
 def _consistent_transform(task, fn):
@@ -571,6 +775,30 @@ def classify(task, trace=False):
     # ── Grids different size (catch-all) ──────────────────────────────────────
     say("different_size")
 
+    if is_colour_bands_uniform(task):
+        say("is_colour_bands_uniform=YES  →  COLOUR_BANDS")
+        return "COLOUR_BANDS"
+
+    if is_zero_block_complete(task):
+        say("is_zero_block_complete=YES  →  COMPLETE_PATTERN")
+        return "COMPLETE_PATTERN"
+
+    if is_largest_hollow_rect(task):
+        say("is_largest_hollow_rect=YES  →  LARGEST_OUTLINE")
+        return "LARGEST_OUTLINE"
+
+    if is_extract_rect_interior(task):
+        say("is_extract_rect_interior=YES  →  EXTRACT_RECT_INTERIOR")
+        return "EXTRACT_RECT_INTERIOR"
+
+    if is_odd_cell_embedded(task):
+        say("is_odd_cell_embedded=YES  →  ODD_CELL_RECOLOUR")
+        return "ODD_CELL_RECOLOUR"
+
+    if is_single_shape_sparse(task):
+        say("is_single_shape_sparse=YES  →  SINGLE_SHAPE_EXTRACT")
+        return "SINGLE_SHAPE_EXTRACT"
+
     if has_unique_colour_shape(task):
         say("has_unique_colour_shape=YES  →  EXTRACT_UNIQUE_SHAPE")
         return "EXTRACT_UNIQUE_SHAPE"
@@ -611,6 +839,8 @@ CLASSIFIED_LABELS = {
     "TILE_ASSEMBLY",
     "GRID_SELECT_ELEMENT", "AND_HALVES",
     "ONE_DIM_EXTEND", "ONE_DIM_CROP",
+    "COLOUR_BANDS", "COMPLETE_PATTERN", "LARGEST_OUTLINE",
+    "EXTRACT_RECT_INTERIOR", "ODD_CELL_RECOLOUR", "SINGLE_SHAPE_EXTRACT",
     "EXTRACT_UNIQUE_SHAPE", "EXTRACT_OBJECT",
     "OVERLAP_OR_COUNT_SHAPES", "INPUT_FROM_OUTPUT_TRANSFORMS",
 }

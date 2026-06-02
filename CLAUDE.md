@@ -38,6 +38,28 @@ Next focus: continue expanding the category taxonomy and begin exploring what di
 - Each category should eventually have a dedicated solver module.
 - Start simple; grow complexity only when simpler approaches fail.
 
+## ARC task analysis protocol
+
+When analysing an unknown task or bucket of tasks, run these steps **in order** before enumerating pixel-level features. The ordering is the point — it prevents defaulting to bottom-up feature cataloguing before higher-level patterns have been checked.
+
+1. **What is this input ALMOST?**
+   Check for near-regularity: almost uniform (a few contaminating cells), almost symmetric (one region breaks it), almost tiled (one tile is wrong or missing), almost identical to another region. If found, the transformation is likely *repair, extract, or complete* the near-regular structure.
+
+2. **What doesn't belong?**
+   Look for anomalous cells, colours out of place, broken regularity, or a single shape that violates an otherwise consistent pattern. The anomaly is often the answer — either it IS the output, or removing/repairing it IS the rule.
+
+3. **Hold input and output together — what rule connects them?**
+   The input and output together are the demonstration; the answer you are seeking is how to get from one to the other. The older framing ("what question is the input posing?") is a useful special case, but the general form is: treat each training pair as a worked example and ask what rule makes this output the inevitable consequence of this input. This matters because the role of individual cells often only becomes clear when you see both sides — the input alone does not tell you what a marker cell means.
+
+4. **What is the shortest rule that fits all training pairs?**
+   If the rule requires more than one sentence, the abstraction is probably wrong. Prefer rules with zero special cases over rules with one, and rules with one over rules with two.
+
+Only after steps 1–4 fail to yield a hypothesis: enumerate colours, shapes, and spatial features bottom-up.
+
+**Worked example (5bd6f4ac):** Bottom-up cataloguing failed. Step 2 caught it instantly — grey cells in otherwise uniform-colour blocks are anomalies. Rule: repair by filling grey cells with the surrounding block colour. One sentence, zero special cases.
+
+**Worked example (4522001f):** An L-shape of green cells with a single red corner. Step 2 catches the red cell as anomaly, but "fix the anomaly" is not enough — fixing it gives a solid green block, which is not the output. Only by holding input and output together does the rule emerge: double the L-shape into a solid block; place a second identical copy with its inner corner adjacent to the free corner of the first block (the corner not touching the input border), and its outer sides bounded by black or the grid edge. The red cell is not an independent marker — it IS the free corner, fully derivable from the L-shape geometry alone.
+
 ## Environment setup
 
 ```bash

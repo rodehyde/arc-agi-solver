@@ -28,6 +28,10 @@ def _show_grid(ax, grid, title='', border_colour=None):
               interpolation='nearest')
     ax.set_title(title, fontsize=8, pad=3)
     ax.set_xticks([]); ax.set_yticks([])
+    ax.set_xticks(np.arange(-0.5, grid.shape[1], 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, grid.shape[0], 1), minor=True)
+    ax.grid(which='minor', color='#555555', linewidth=0.5)
+    ax.tick_params(which='minor', size=0)
     if border_colour:
         for sp in ax.spines.values():
             sp.set_visible(True)

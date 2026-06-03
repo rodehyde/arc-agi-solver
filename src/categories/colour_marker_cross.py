@@ -56,8 +56,10 @@ def detect_colour_marker_cross(task: dict) -> bool:
             return False
 
         expected = _apply_marker_cross(inp)
-        if expected != out:
-            return False
+        for rr in range(H):
+            for cc in range(W):
+                if int(expected[rr][cc]) != int(out[rr][cc]):
+                    return False
 
     return True
 

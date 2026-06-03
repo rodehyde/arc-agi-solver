@@ -24,6 +24,33 @@ import json
 import numpy as np
 from collections import defaultdict
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from src.categories.rectangle_from_corners import (
+    detect_rectangle_from_corners, solve_rectangle_from_corners,
+)
+from src.categories.gap_bridge import detect_gap_bridge, solve_gap_bridge
+from src.categories.separator_grid_cross_fill import (
+    detect_separator_grid_cross_fill, solve_separator_grid_cross_fill,
+)
+from src.categories.bounding_box_fill import (
+    detect_bounding_box_fill, solve_bounding_box_fill,
+)
+from src.categories.hole_fill_2x2 import detect_hole_fill_2x2, solve_hole_fill_2x2
+from src.categories.colour_marker_cross import (
+    detect_colour_marker_cross, solve_colour_marker_cross,
+)
+from src.categories.vertical_comb import detect_vertical_comb, solve_vertical_comb
+from src.categories.separator_grid_diagonal_fill import (
+    detect_separator_grid_diagonal_fill, solve_separator_grid_diagonal_fill,
+)
+from src.categories.border_encoded_scale import (
+    detect_border_encoded_scale, solve_border_encoded_scale,
+)
+from src.categories.quadrant_reflect import (
+    detect_quadrant_reflect, solve_quadrant_reflect,
+)
 
 TRAINING_DIR = Path(__file__).parent.parent / "data" / "training"
 
@@ -816,23 +843,74 @@ def _solve_logical_and(task: dict):
     return results
 
 
+# ── Wrappers for category-module solvers ──────────────────────────────────────
+#
+# Category modules expose:
+#   detect_*(task: dict) -> bool           — verifies rule on training pairs
+#   solve_*(input_grid: list[list[int]])   — applies rule to one grid
+#
+# Here we wrap them into the (applies_fn, solve_fn) convention used by
+# find_solver().  applies_fn returns True (detect is expensive; verify() does
+# the real check).  solve_fn converts numpy <-> list at the boundary.
+
+def _make_category_solver(solve_fn):
+    """Return a _solve_X function that wraps a category-module solve_* function."""
+    def _solve(task: dict):
+        results = []
+        for tp in task["test"]:
+            inp = tp["input"]
+            inp_list = inp.tolist() if hasattr(inp, "tolist") else inp
+            out = solve_fn(inp_list)
+            if out is None:
+                return None
+            results.append(np.array(out, dtype=np.uint8))
+        return results
+    return _solve
+
+
+_solve_rectangle_from_corners   = _make_category_solver(solve_rectangle_from_corners)
+_solve_gap_bridge               = _make_category_solver(solve_gap_bridge)
+_solve_separator_grid_cross     = _make_category_solver(solve_separator_grid_cross_fill)
+_solve_bounding_box_fill        = _make_category_solver(solve_bounding_box_fill)
+_solve_hole_fill_2x2            = _make_category_solver(solve_hole_fill_2x2)
+_solve_colour_marker_cross      = _make_category_solver(solve_colour_marker_cross)
+_solve_vertical_comb            = _make_category_solver(solve_vertical_comb)
+_solve_separator_grid_diagonal  = _make_category_solver(solve_separator_grid_diagonal_fill)
+_solve_border_encoded_scale     = _make_category_solver(solve_border_encoded_scale)
+_solve_quadrant_reflect         = _make_category_solver(solve_quadrant_reflect)
+
+
+def _always(d): return True  # noqa: E731  — permissive pre-filter; verify() is the gate
+
+
 # ── Primitive registry ────────────────────────────────────────────────────────
 #
 # Order matters: more specific solvers should come first.
 # find_solver() returns the first one that passes verify().
 
 ALL_PRIMITIVES = [
-    ("COLOUR_BY_HEIGHT",     _applies_colour_by_height,     _solve_colour_by_height),
-    ("FLOOD_FILL_ENCLOSED",  _applies_flood_fill_enclosed,  _solve_flood_fill_enclosed),
-    ("EXPAND_CROSS",         _applies_expand_cross,         _solve_expand_cross),
-    ("COLOUR_HALO",          _applies_colour_halo,          _solve_colour_halo),
-    ("COLOUR_SUBSTITUTION",  _applies_colour_subst,         _solve_colour_subst),
-    ("COLOUR_REMOVAL",       _applies_colour_removal,       _solve_colour_removal),
-    ("UNIFORM_ROW_MARK",     _applies_uniform_row_mark,     _solve_uniform_row_mark),
-    ("MIRROR_AT_MARKER",     _applies_mirror_at_marker,     _solve_mirror_at_marker),
-    ("SHIFT_DOWN_ONE",       _applies_shift_down_one,       _solve_shift_down_one),
-    ("CROP_BOUNDING_BOX",    _applies_crop_bounding_box,    _solve_crop_bounding_box),
-    ("LOGICAL_AND",          _applies_logical_and,          _solve_logical_and),
+    ("COLOUR_BY_HEIGHT",              _applies_colour_by_height,     _solve_colour_by_height),
+    ("FLOOD_FILL_ENCLOSED",           _applies_flood_fill_enclosed,  _solve_flood_fill_enclosed),
+    ("EXPAND_CROSS",                  _applies_expand_cross,         _solve_expand_cross),
+    ("COLOUR_HALO",                   _applies_colour_halo,          _solve_colour_halo),
+    ("COLOUR_SUBSTITUTION",           _applies_colour_subst,         _solve_colour_subst),
+    ("COLOUR_REMOVAL",                _applies_colour_removal,       _solve_colour_removal),
+    ("UNIFORM_ROW_MARK",              _applies_uniform_row_mark,     _solve_uniform_row_mark),
+    ("MIRROR_AT_MARKER",              _applies_mirror_at_marker,     _solve_mirror_at_marker),
+    ("SHIFT_DOWN_ONE",                _applies_shift_down_one,       _solve_shift_down_one),
+    ("CROP_BOUNDING_BOX",             _applies_crop_bounding_box,    _solve_crop_bounding_box),
+    ("LOGICAL_AND",                   _applies_logical_and,          _solve_logical_and),
+    # ── category-module solvers ──
+    ("RECTANGLE_FROM_CORNERS",        _always, _solve_rectangle_from_corners),
+    ("GAP_BRIDGE",                    _always, _solve_gap_bridge),
+    ("SEPARATOR_GRID_CROSS_FILL",     _always, _solve_separator_grid_cross),
+    ("BOUNDING_BOX_FILL",             _always, _solve_bounding_box_fill),
+    ("HOLE_FILL_2X2",                 _always, _solve_hole_fill_2x2),
+    ("COLOUR_MARKER_CROSS",           _always, _solve_colour_marker_cross),
+    ("VERTICAL_COMB",                 _always, _solve_vertical_comb),
+    ("SEPARATOR_GRID_DIAGONAL_FILL",  _always, _solve_separator_grid_diagonal),
+    ("BORDER_ENCODED_SCALE",          _always, _solve_border_encoded_scale),
+    ("QUADRANT_REFLECT",              _always, _solve_quadrant_reflect),
 ]
 
 

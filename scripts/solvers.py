@@ -51,6 +51,13 @@ from src.categories.border_encoded_scale import (
 from src.categories.quadrant_reflect import (
     detect_quadrant_reflect, solve_quadrant_reflect,
 )
+from src.categories.self_tile import detect_self_tile, solve_self_tile
+from src.categories.line_fill_by_colour import (
+    detect_line_fill_by_colour, solve_line_fill_by_colour,
+)
+from src.categories.row_fill_meet_middle import (
+    detect_row_fill_meet_middle, solve_row_fill_meet_middle,
+)
 
 TRAINING_DIR = Path(__file__).parent.parent / "data" / "training"
 
@@ -878,6 +885,9 @@ _solve_vertical_comb            = _make_category_solver(solve_vertical_comb)
 _solve_separator_grid_diagonal  = _make_category_solver(solve_separator_grid_diagonal_fill)
 _solve_border_encoded_scale     = _make_category_solver(solve_border_encoded_scale)
 _solve_quadrant_reflect         = _make_category_solver(solve_quadrant_reflect)
+_solve_self_tile                = _make_category_solver(solve_self_tile)
+_solve_line_fill_by_colour      = _make_category_solver(solve_line_fill_by_colour)
+_solve_row_fill_meet_middle     = _make_category_solver(solve_row_fill_meet_middle)
 
 
 def _always(d): return True  # noqa: E731  — permissive pre-filter; verify() is the gate
@@ -911,6 +921,9 @@ ALL_PRIMITIVES = [
     ("SEPARATOR_GRID_DIAGONAL_FILL",  _always, _solve_separator_grid_diagonal),
     ("BORDER_ENCODED_SCALE",          _always, _solve_border_encoded_scale),
     ("QUADRANT_REFLECT",              _always, _solve_quadrant_reflect),
+    ("SELF_TILE",                     _always, _solve_self_tile),
+    ("LINE_FILL_BY_COLOUR",           _always, _solve_line_fill_by_colour),
+    ("ROW_FILL_MEET_MIDDLE",          _always, _solve_row_fill_meet_middle),
 ]
 
 

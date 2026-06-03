@@ -25,6 +25,9 @@ from .separator_grid_diagonal_fill import (
 )
 from .border_encoded_scale import categorise_border_encoded_scale, BORDER_ENCODED_SCALE_CATEGORIES
 from .quadrant_reflect import categorise_quadrant_reflect, QUADRANT_REFLECT_CATEGORIES
+from .self_tile import categorise_self_tile, SELF_TILE_CATEGORIES
+from .line_fill_by_colour import categorise_line_fill_by_colour, LINE_FILL_BY_COLOUR_CATEGORIES
+from .row_fill_meet_middle import categorise_row_fill_meet_middle, ROW_FILL_MEET_MIDDLE_CATEGORIES
 
 CATEGORIES = (
     SIZE_CATEGORIES + CONTENT_CATEGORIES + GEOMETRIC_CATEGORIES
@@ -35,6 +38,8 @@ CATEGORIES = (
     + HOLE_FILL_2X2_CATEGORIES + COLOUR_MARKER_CROSS_CATEGORIES
     + VERTICAL_COMB_CATEGORIES + SEPARATOR_GRID_DIAGONAL_FILL_CATEGORIES
     + BORDER_ENCODED_SCALE_CATEGORIES + QUADRANT_REFLECT_CATEGORIES
+    + SELF_TILE_CATEGORIES + LINE_FILL_BY_COLOUR_CATEGORIES
+    + ROW_FILL_MEET_MIDDLE_CATEGORIES
 )
 
 
@@ -60,6 +65,9 @@ def categorise_task(task: dict) -> list[str]:
         + categorise_separator_grid_diagonal_fill(task)
         + categorise_border_encoded_scale(task)
         + categorise_quadrant_reflect(task)
+        + categorise_self_tile(task)
+        + categorise_line_fill_by_colour(task)
+        + categorise_row_fill_meet_middle(task)
     )
 
 

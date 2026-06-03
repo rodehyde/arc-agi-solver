@@ -37,6 +37,29 @@ Next focus: continue expanding the category taxonomy and begin exploring what di
 - A task can belong to multiple categories; categories are not mutually exclusive.
 - Each category should eventually have a dedicated solver module.
 - Start simple; grow complexity only when simpler approaches fail.
+- **Prefer broad solvers over narrow ones.** The goal is ~20–30 general solver families that together cover most tasks — not 400 task-specific solvers. A rule covering 5 tasks with one clean sentence is worth more than 5 single-task rules.
+
+### Before writing a new solver module
+
+After deriving a rule from one task, run the detect function across all 400 training tasks *before* committing to a standalone module:
+
+```bash
+conda run -n arc-agi python -c "
+import sys, json
+sys.path.insert(0, '.')
+from src.loader import load_all_tasks
+# replace detect_X with your candidate function
+from your_module import detect_X
+tasks = load_all_tasks('data/training')
+hits = [t['task_id'] for t in tasks if detect_X(t)]
+print(len(hits), 'tasks match:', hits)
+"
+```
+
+- **Coverage ≥ 2–3 tasks**: the rule is general enough — write the module.
+- **Coverage = 1**: record the rule in `results/solver_backlog.md`, then search for structurally similar unsolved tasks before writing a dedicated module. A single-task solver is a last resort, not a first step.
+
+When analysing a batch of tasks, look for tasks that share the same structural pattern and group them. Derive the rule to cover the whole group, not just the single example task that first revealed it.
 
 ## ARC task analysis protocol
 

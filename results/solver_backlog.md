@@ -124,3 +124,14 @@ Tasks: `469497ad`, `007bbfb7`
 **Step 4:** Extract the shape from the non-empty quadrant; recolour it to the separator colour; reflect it into all four quadrants (top-left: original, top-right: flip_h, bottom-left: flip_v, bottom-right: rot180); output size = 2 × quadrant dimensions.
 
 **Note:** Distinct from existing GEOMETRIC_TRANSFORM (quad_hv) because the input is partitioned by a separator cross — the transform applies to one quadrant, not the whole grid. Needs a new solver module or extension to geometric_transforms.py.
+
+---
+
+## `05f2a901` — SLIDE_TO_ADJACENT (coverage = 1, awaiting family)
+
+**Step 1:** Two shapes on a sparse background — an irregular shape (colour 2) and a compact 2×2 block (colour 8). Both overlap in either their row or column range.  
+**Step 2:** The gap between them is the anomaly — shape 2 is not touching shape 8.  
+**Step 3:** The 8-block is fixed. Shape 2 slides toward the 8-block along the axis where their row/column ranges overlap, until bounding boxes are adjacent (gap = 0). The shape is translated, not rotated or reshaped.  
+**Step 4:** Find the axis of overlap (column ranges overlap → move vertically; row ranges overlap → move horizontally). Move shape 2 until its bounding box is one step away from shape 8's bounding box.
+
+**Coverage note:** Rule as stated (colours 2 and 8 specifically) hits only 1 task. Likely generalises to any two distinct shapes where one slides toward the other — broaden the detect function before writing a module.

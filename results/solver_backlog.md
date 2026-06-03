@@ -112,3 +112,15 @@ Tasks: `469497ad`, `007bbfb7`
 **Step 4:** Scale = distinct colours in L-border + 1. Scale up the full 5×5 input by that factor. Place diagonal colour-2 rays outward from each corner of the scaled inner block that is not flush with the inner region edge.
 
 **CLAUDE.md candidate:** *Input encodes its own output size via a border legend* — the L-shaped border acts as a scale key; count its distinct colours to derive the expansion factor.
+
+
+---
+
+## `47c1f68c` — QUADRANT_REFLECT
+
+**Step 1:** Input has a separator cross (one full row + one full column of separator colour) dividing the grid into 4 quadrants. One quadrant contains a shape; the other three are empty.  
+**Step 2:** The three empty quadrants are conspicuously blank — they are waiting to be filled.  
+**Step 3:** The shape from the populated quadrant appears in all four quadrants of the output, recoloured to the separator colour, with the separator lines removed.  
+**Step 4:** Extract the shape from the non-empty quadrant; recolour it to the separator colour; reflect it into all four quadrants (top-left: original, top-right: flip_h, bottom-left: flip_v, bottom-right: rot180); output size = 2 × quadrant dimensions.
+
+**Note:** Distinct from existing GEOMETRIC_TRANSFORM (quad_hv) because the input is partitioned by a separator cross — the transform applies to one quadrant, not the whole grid. Needs a new solver module or extension to geometric_transforms.py.

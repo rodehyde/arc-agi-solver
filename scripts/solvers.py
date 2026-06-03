@@ -274,6 +274,548 @@ def _solve_flood_fill_enclosed(task: dict):
     return results
 
 
+# ── EXPAND_CROSS ──────────────────────────────────────────────────────────────
+#
+# Each small cross (centre colour C, arm colour A at distance 1 in all 4
+# cardinal directions) expands into a larger star pattern:
+#   A fills a plus-sign extending 2 steps in each of the 4 cardinal directions
+#   C fills the 8 diagonal positions: 4 at distance 1, 4 at distance 2
+#
+# Example task: 0962bcdd
+
+def _find_crosses(grid: np.ndarray) -> list:
+    """Return [(centre_colour, arm_colour, row, col)] for every cross in grid.
+
+    A cross is a non-zero centre cell whose four cardinal neighbours all share
+    the same non-zero colour different from the centre.
+    """
+    rows, cols = grid.shape
+    crosses = []
+    for r in range(1, rows - 1):
+        for c in range(1, cols - 1):
+            centre = int(grid[r, c])
+            if centre == 0:
+                continue
+            arms = [int(grid[r-1, c]), int(grid[r+1, c]),
+                    int(grid[r, c-1]), int(grid[r, c+1])]
+            if all(a != 0 and a != centre for a in arms) and len(set(arms)) == 1:
+                crosses.append((centre, arms[0], r, c))
+    return crosses
+
+
+def _applies_expand_cross(d: dict) -> bool:
+    """Cells are gained but no new colours appear — expansion uses only existing colours."""
+    return (d["zeros_gained"] > 0
+            and d["zeros_lost"] == 0
+            and d["recoloured"] == 0
+            and len(d["new_colours"]) == 0)
+
+
+_CROSS_CARDINAL = [(-2, 0), (-1, 0), (1, 0), (2, 0),
+                   (0, -2), (0, -1), (0, 1), (0, 2)]
+_CROSS_DIAGONAL = [(-1, -1), (-1, 1), (1, -1), (1, 1),
+                   (-2, -2), (-2, 2), (2, -2), (2, 2)]
+
+
+def _expand_crosses(inp: np.ndarray):
+    """Apply the expand-cross rule to a single grid.  Returns None if no crosses found."""
+    crosses = _find_crosses(inp)
+    if not crosses:
+        return None
+    out = inp.copy()
+    rows, cols = inp.shape
+    for centre_c, arm_c, r, c in crosses:
+        for dr, dc in _CROSS_CARDINAL:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < rows and 0 <= nc < cols:
+                out[nr, nc] = arm_c
+        for dr, dc in _CROSS_DIAGONAL:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < rows and 0 <= nc < cols:
+                out[nr, nc] = centre_c
+    return out
+
+
+def _solve_expand_cross(task: dict):
+    results = []
+    for tp in task["test"]:
+        pred = _expand_crosses(tp["input"])
+        if pred is None:
+            return None
+        results.append(pred)
+    return results
+
+
+# ── COLOUR_HALO ───────────────────────────────────────────────────────────────
+#
+# Each non-zero cell of colour S gains a halo of colour H in specific directions
+# (cardinal and/or diagonal) that are empty (0) in the input.  The mapping
+# S → (direction_type, H) is learned from training pairs.
+#
+# Example tasks: 0ca9ddb6 (c1→c7 cardinal halo, c2→c4 diagonal halo)
+
+_CARDINAL = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+_DIAGONAL = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+
+
+def _applies_colour_halo(d: dict) -> bool:
+    """Cells gained; new colours appear; nothing erased or recoloured."""
+    return (d["zeros_gained"] > 0
+            and d["zeros_lost"] == 0
+            and d["recoloured"] == 0
+            and len(d["new_colours"]) > 0)
+
+
+def _solve_colour_halo(task: dict):
+    cardinal_halo: dict[int, int] = {}   # source colour → halo colour
+    diagonal_halo: dict[int, int] = {}
+
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        if inp.shape != out.shape:
+            return None
+        rows, cols = inp.shape
+
+        for r in range(rows):
+            for c in range(cols):
+                src = int(inp[r, c])
+                if src == 0:
+                    continue
+
+                for dr, dc in _CARDINAL:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < rows and 0 <= nc < cols and inp[nr, nc] == 0 and out[nr, nc] != 0:
+                        h = int(out[nr, nc])
+                        if src in cardinal_halo and cardinal_halo[src] != h:
+                            return None  # contradictory mapping
+                        cardinal_halo[src] = h
+
+                for dr, dc in _DIAGONAL:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < rows and 0 <= nc < cols and inp[nr, nc] == 0 and out[nr, nc] != 0:
+                        h = int(out[nr, nc])
+                        if src in diagonal_halo and diagonal_halo[src] != h:
+                            return None
+                        diagonal_halo[src] = h
+
+    if not cardinal_halo and not diagonal_halo:
+        return None
+
+    results = []
+    for tp in task["test"]:
+        inp = tp["input"]
+        out = inp.copy()
+        rows, cols = inp.shape
+
+        for r in range(rows):
+            for c in range(cols):
+                src = int(inp[r, c])
+                if src == 0:
+                    continue
+
+                if src in cardinal_halo:
+                    for dr, dc in _CARDINAL:
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < rows and 0 <= nc < cols and inp[nr, nc] == 0:
+                            out[nr, nc] = cardinal_halo[src]
+
+                if src in diagonal_halo:
+                    for dr, dc in _DIAGONAL:
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < rows and 0 <= nc < cols and inp[nr, nc] == 0:
+                            out[nr, nc] = diagonal_halo[src]
+
+        results.append(out)
+    return results
+
+
+# ── COLOUR_SUBSTITUTION ───────────────────────────────────────────────────────
+#
+# Every non-zero colour maps to a different non-zero colour; zeros are
+# unchanged.  The mapping is learned from training pairs.  All training pairs
+# must produce the same consistent mapping.
+#
+# Covers tasks in COLOUR_SUBSTITUTION and SAME_SIZE_NEW_COLOURS categories.
+
+def _applies_colour_subst(d: dict) -> bool:
+    """Cells are recoloured but none gained or lost."""
+    return (d["zeros_gained"] == 0
+            and d["zeros_lost"] == 0
+            and d["recoloured"] > 0)
+
+
+def _solve_colour_subst(task: dict):
+    mapping: dict[int, int] = {}
+
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        if inp.shape != out.shape:
+            return None
+        for src, dst in zip(inp.flat, out.flat):
+            src, dst = int(src), int(dst)
+            if src == dst:
+                continue
+            if src == 0 or dst == 0:
+                return None  # zero ↔ non-zero not allowed here
+            if src in mapping and mapping[src] != dst:
+                return None  # contradictory mapping
+            mapping[src] = dst
+
+    if not mapping:
+        return None
+
+    results = []
+    for tp in task["test"]:
+        inp = tp["input"]
+        out = inp.copy()
+        rows, cols = inp.shape
+        for r in range(rows):
+            for c in range(cols):
+                v = int(inp[r, c])
+                if v in mapping:
+                    out[r, c] = mapping[v]
+        results.append(out)
+    return results
+
+
+# ── COLOUR_REMOVAL ────────────────────────────────────────────────────────────
+#
+# One or more colours in the input are set to 0 in the output; all other
+# cells are unchanged.  The set of removed colours is learned from training.
+#
+# Covers tasks in COLOUR_REMOVAL category.
+
+def _applies_colour_removal(d: dict) -> bool:
+    """Cells lost but none gained or recoloured."""
+    return (d["zeros_gained"] == 0
+            and d["zeros_lost"] > 0
+            and d["recoloured"] == 0
+            and len(d["lost_colours"]) > 0)
+
+
+def _solve_colour_removal(task: dict):
+    removed: set[int] | None = None
+
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        if inp.shape != out.shape:
+            return None
+        # Colours that are non-zero in input but 0 in output
+        pair_removed = set(int(inp[r, c])
+                           for r in range(inp.shape[0])
+                           for c in range(inp.shape[1])
+                           if inp[r, c] != 0 and out[r, c] == 0)
+        if removed is None:
+            removed = pair_removed
+        elif removed != pair_removed:
+            return None  # removed set differs across pairs
+
+    if not removed:
+        return None
+
+    results = []
+    for tp in task["test"]:
+        inp = tp["input"]
+        out = inp.copy()
+        for colour in removed:
+            out[out == colour] = 0
+        results.append(out)
+    return results
+
+
+# ── UNIFORM_ROW_MARK ─────────────────────────────────────────────────────────
+#
+# Each row that is uniform (all non-zero cells share the same colour) is
+# replaced with a fixed mark colour; non-uniform rows become all-zero.
+# The mark colour is learned from training pairs (it is the single new colour
+# that appears in the output).
+#
+# Example task: 25d8a9c8
+
+def _applies_uniform_row_mark(d: dict) -> bool:
+    """Rows are both zeroed (non-uniform) and recoloured (uniform); one new colour."""
+    return (d["zeros_gained"] == 0
+            and d["zeros_lost"] > 0
+            and d["recoloured"] > 0
+            and len(d["new_colours"]) == 1)
+
+
+def _solve_uniform_row_mark(task: dict):
+    d = task_delta(task)
+    mark = d["new_colours"][0]
+
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        if inp.shape != out.shape:
+            return None
+        for r in range(inp.shape[0]):
+            nz = inp[r][inp[r] != 0]
+            uniform = len(nz) > 0 and len(set(nz.tolist())) == 1
+            expected = np.full(inp.shape[1], mark, dtype=np.uint8) if uniform else np.zeros(inp.shape[1], dtype=np.uint8)
+            if not np.array_equal(out[r], expected):
+                return None  # doesn't fit row-based uniform rule
+
+    results = []
+    for tp in task["test"]:
+        inp = tp["input"]
+        out = np.zeros_like(inp)
+        for r in range(inp.shape[0]):
+            nz = inp[r][inp[r] != 0]
+            if len(nz) > 0 and len(set(nz.tolist())) == 1:
+                out[r] = mark
+        results.append(out)
+    return results
+
+
+# ── MIRROR_AT_MARKER ──────────────────────────────────────────────────────────
+#
+# The input has two colours: a main shape (M) and a marker line (a short row
+# or column of cells adjacent to one edge of M).  The output:
+#   1. Fills all background 0-cells with a fill colour (learned from training).
+#   2. Reflects M across the mirror plane defined by the marker line.
+#   3. Replaces the marker cells with M (they coincide with the inner reflected
+#      positions).
+#
+# Example task: 2bcee788
+
+def _applies_mirror_at_marker(d: dict) -> bool:
+    """Large zero-gain (background fill) + recoloured (marker→M) + one new colour + one lost colour."""
+    return (d["zeros_gained"] > 0
+            and d["zeros_lost"] == 0
+            and d["recoloured"] > 0
+            and len(d["new_colours"]) == 1
+            and len(d["lost_colours"]) == 1)
+
+
+def _mirror_one(inp: np.ndarray, marker_colour: int,
+                main_colour: int, fill_colour: int):
+    """Apply mirror-at-marker to a single grid.  Returns predicted output or None."""
+    rows, cols = inp.shape
+
+    marker_cells = [(r, c) for r in range(rows) for c in range(cols)
+                    if int(inp[r, c]) == marker_colour]
+    main_cells   = [(r, c) for r in range(rows) for c in range(cols)
+                    if int(inp[r, c]) == main_colour]
+    if not marker_cells or not main_cells:
+        return None
+
+    m_rs = set(r for r, c in marker_cells)
+    m_cs = set(c for r, c in marker_cells)
+    s_rs = set(r for r, c in main_cells)
+    s_cs = set(c for r, c in main_cells)
+
+    reflected = None
+
+    # Try horizontal axis (marker occupies a single row band)
+    if len(m_rs) == 1:
+        r_m = next(iter(m_rs))
+        if max(s_rs) < r_m:          # shape is above marker
+            mirror = r_m - 0.5
+        elif min(s_rs) > r_m:        # shape is below marker
+            mirror = r_m + 0.5
+        else:
+            mirror = None
+        if mirror is not None:
+            reflected = [(int(2 * mirror - r), c) for r, c in main_cells]
+
+    # Try vertical axis (marker occupies a single column band)
+    if reflected is None and len(m_cs) == 1:
+        c_m = next(iter(m_cs))
+        if max(s_cs) < c_m:          # shape is left of marker
+            mirror = c_m - 0.5
+        elif min(s_cs) > c_m:        # shape is right of marker
+            mirror = c_m + 0.5
+        else:
+            mirror = None
+        if mirror is not None:
+            reflected = [(r, int(2 * mirror - c)) for r, c in main_cells]
+
+    if reflected is None:
+        return None
+
+    out = np.full((rows, cols), fill_colour, dtype=np.uint8)
+    for r, c in main_cells:
+        if 0 <= r < rows and 0 <= c < cols:
+            out[r, c] = main_colour
+    for r, c in reflected:
+        if 0 <= r < rows and 0 <= c < cols:
+            out[r, c] = main_colour
+    return out
+
+
+def _solve_mirror_at_marker(task: dict):
+    d = task_delta(task)
+    fill_colour   = d["new_colours"][0]
+    marker_colour = d["lost_colours"][0]
+
+    results = []
+    for tp in task["test"]:
+        inp = tp["input"]
+        colours = set(int(v) for v in inp.flat if v != 0)
+        colours.discard(marker_colour)
+        if len(colours) != 1:
+            return None
+        main_colour = colours.pop()
+        pred = _mirror_one(inp, marker_colour, main_colour, fill_colour)
+        if pred is None:
+            return None
+        results.append(pred)
+    return results
+
+
+# ── SHIFT_DOWN_ONE ────────────────────────────────────────────────────────────
+#
+# Every cell shifts down by one row; the top row becomes all zeros.
+# Works when the bottom row is already all zeros (no cells fall off the grid).
+#
+# Example task: 25ff71a9
+
+def _applies_shift_down_one(d: dict) -> bool:
+    """Cells both gained and lost with no recolouring and no colour change."""
+    return (d["zeros_gained"] > 0
+            and d["zeros_lost"] > 0
+            and d["recoloured"] == 0
+            and len(d["new_colours"]) == 0
+            and len(d["lost_colours"]) == 0)
+
+
+def _solve_shift_down_one(task: dict):
+    """Shift all cells down by one row; top row → zeros.  Verify on training first."""
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        if inp.shape != out.shape:
+            return None
+        expected = np.zeros_like(inp)
+        expected[1:] = inp[:-1]
+        if not np.array_equal(expected, out):
+            return None
+
+    results = []
+    for tp in task["test"]:
+        inp = tp["input"]
+        out = np.zeros_like(inp)
+        out[1:] = inp[:-1]
+        results.append(out)
+    return results
+
+
+# ── CROP_BOUNDING_BOX ─────────────────────────────────────────────────────────
+#
+# The output is the tightest bounding box around all non-zero cells in the input.
+# Input and output have different sizes so task_delta returns all zeros (null delta).
+#
+# Example task: 1cf80156
+
+def _applies_crop_bounding_box(d: dict) -> bool:
+    """Null delta — all training pairs are size-changing (task_delta skips them)."""
+    return d["total_cells"] == 0
+
+
+def _solve_crop_bounding_box(task: dict):
+    """Crop the input to the bounding box of non-zero cells."""
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        rows_nz = np.any(inp != 0, axis=1)
+        cols_nz = np.any(inp != 0, axis=0)
+        if not np.any(rows_nz) or not np.any(cols_nz):
+            return None
+        r0, r1 = int(np.where(rows_nz)[0][0]),  int(np.where(rows_nz)[0][-1])
+        c0, c1 = int(np.where(cols_nz)[0][0]),  int(np.where(cols_nz)[0][-1])
+        cropped = inp[r0:r1+1, c0:c1+1]
+        if not np.array_equal(cropped, out):
+            return None
+
+    results = []
+    for tp in task["test"]:
+        inp = tp["input"]
+        rows_nz = np.any(inp != 0, axis=1)
+        cols_nz = np.any(inp != 0, axis=0)
+        if not np.any(rows_nz) or not np.any(cols_nz):
+            return None
+        r0, r1 = int(np.where(rows_nz)[0][0]),  int(np.where(rows_nz)[0][-1])
+        c0, c1 = int(np.where(cols_nz)[0][0]),  int(np.where(cols_nz)[0][-1])
+        results.append(inp[r0:r1+1, c0:c1+1].copy())
+    return results
+
+
+# ── LOGICAL_AND_TWO_HALVES ────────────────────────────────────────────────────
+#
+# The input is split by a separator column (or row) of a single uniform colour
+# into two equal halves.  A non-zero cell in the output marks positions where
+# BOTH halves have non-zero cells.  The mark colour is learned from training.
+# Input and output have different sizes so task_delta returns all zeros.
+#
+# Example task: 0520fde7
+
+def _split_by_separator(inp: np.ndarray):
+    """Return (left_half, right_half) if a uniform non-zero column splits the grid
+    into two equal halves.  Also checks rows.  Returns None if not found."""
+    rows, cols = inp.shape
+
+    for c in range(cols):
+        col = inp[:, c]
+        if len(set(col.tolist())) == 1 and col[0] != 0:
+            left  = inp[:, :c]
+            right = inp[:, c+1:]
+            if left.shape == right.shape and left.size > 0:
+                return left, right
+
+    for r in range(rows):
+        row = inp[r, :]
+        if len(set(row.tolist())) == 1 and row[0] != 0:
+            top    = inp[:r, :]
+            bottom = inp[r+1:, :]
+            if top.shape == bottom.shape and top.size > 0:
+                return top, bottom
+
+    return None
+
+
+def _applies_logical_and(d: dict) -> bool:
+    """Null delta — all training pairs are size-changing."""
+    return d["total_cells"] == 0
+
+
+def _solve_logical_and(task: dict):
+    """Mark positions where both halves are non-zero with the learned mark colour."""
+    mark_colour = None
+
+    for p in task["train"]:
+        inp, out = p["input"], p["output"]
+        halves = _split_by_separator(inp)
+        if halves is None:
+            return None
+        left, right = halves
+        if left.shape != out.shape:
+            return None
+        both_nz = (left != 0) & (right != 0)
+        if not np.array_equal(both_nz, out != 0):
+            return None
+        colours = set(out[out != 0].tolist())
+        if len(colours) != 1:
+            return None
+        mc = colours.pop()
+        if mark_colour is None:
+            mark_colour = mc
+        elif mark_colour != mc:
+            return None
+
+    if mark_colour is None:
+        return None
+
+    results = []
+    for tp in task["test"]:
+        inp = tp["input"]
+        halves = _split_by_separator(inp)
+        if halves is None:
+            return None
+        left, right = halves
+        out = np.zeros_like(left)
+        out[(left != 0) & (right != 0)] = mark_colour
+        results.append(out)
+    return results
+
+
 # ── Primitive registry ────────────────────────────────────────────────────────
 #
 # Order matters: more specific solvers should come first.
@@ -282,7 +824,15 @@ def _solve_flood_fill_enclosed(task: dict):
 ALL_PRIMITIVES = [
     ("COLOUR_BY_HEIGHT",     _applies_colour_by_height,     _solve_colour_by_height),
     ("FLOOD_FILL_ENCLOSED",  _applies_flood_fill_enclosed,  _solve_flood_fill_enclosed),
-    # New primitives will be added here
+    ("EXPAND_CROSS",         _applies_expand_cross,         _solve_expand_cross),
+    ("COLOUR_HALO",          _applies_colour_halo,          _solve_colour_halo),
+    ("COLOUR_SUBSTITUTION",  _applies_colour_subst,         _solve_colour_subst),
+    ("COLOUR_REMOVAL",       _applies_colour_removal,       _solve_colour_removal),
+    ("UNIFORM_ROW_MARK",     _applies_uniform_row_mark,     _solve_uniform_row_mark),
+    ("MIRROR_AT_MARKER",     _applies_mirror_at_marker,     _solve_mirror_at_marker),
+    ("SHIFT_DOWN_ONE",       _applies_shift_down_one,       _solve_shift_down_one),
+    ("CROP_BOUNDING_BOX",    _applies_crop_bounding_box,    _solve_crop_bounding_box),
+    ("LOGICAL_AND",          _applies_logical_and,          _solve_logical_and),
 ]
 
 

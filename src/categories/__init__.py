@@ -8,11 +8,12 @@ from .tiling import (
     categorise_tile_fill, TILE_FILL_CATEGORIES,
     categorise_tile_compress, TILE_COMPRESS_CATEGORIES,
 )
+from .corner_staircase import categorise_corner_staircase, CORNER_STAIRCASE_CATEGORIES
 
 CATEGORIES = (
     SIZE_CATEGORIES + CONTENT_CATEGORIES + GEOMETRIC_CATEGORIES
     + TRANSFORM_CATEGORIES + FLOOD_FILL_CATEGORIES + LOGICAL_OP_CATEGORIES
-    + TILE_FILL_CATEGORIES + TILE_COMPRESS_CATEGORIES
+    + TILE_FILL_CATEGORIES + TILE_COMPRESS_CATEGORIES + CORNER_STAIRCASE_CATEGORIES
 )
 
 
@@ -27,6 +28,7 @@ def categorise_task(task: dict) -> list[str]:
         + categorise_logical_op(task)
         + categorise_tile_fill(task)
         + categorise_tile_compress(task)
+        + categorise_corner_staircase(task)
     )
 
 

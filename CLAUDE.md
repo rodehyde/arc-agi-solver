@@ -51,14 +51,37 @@ When analysing an unknown task or bucket of tasks, run these steps **in order** 
 3. **Hold input and output together — what rule connects them?**
    The input and output together are the demonstration; the answer you are seeking is how to get from one to the other. The older framing ("what question is the input posing?") is a useful special case, but the general form is: treat each training pair as a worked example and ask what rule makes this output the inevitable consequence of this input. This matters because the role of individual cells often only becomes clear when you see both sides — the input alone does not tell you what a marker cell means.
 
-4. **What is the shortest rule that fits all training pairs?**
-   If the rule requires more than one sentence, the abstraction is probably wrong. Prefer rules with zero special cases over rules with one, and rules with one over rules with two.
+4. **What is the shortest *complete* rule that fits all training pairs?**
+   If the rule requires more than one sentence, the abstraction is probably wrong. Prefer rules with zero special cases over rules with one, and rules with one over rules with two. Critically: any observation from step 3 that distinguishes this rule from a plausible alternative must survive the compression. Brevity cannot come at the cost of correctness — "shortest" means no unnecessary words, not missing clauses.
 
 Only after steps 1–4 fail to yield a hypothesis: enumerate colours, shapes, and spatial features bottom-up.
+
+**Read the training pairs in order — the first pair is often a legend.** When the first pair's output recolours a single-colour shape into two or more clearly geometric sub-shapes (e.g., 2×2 blocks and 3×1 strips), those shapes are the *tile types*, *stamps*, or *tools* available for the transformation. Later pairs are then instances of the same packing or placement rule applied to different inputs. If the first pair looks simpler or more structured than the rest, treat it as a worked example embedded inside the training data.
 
 **Worked example (5bd6f4ac):** Bottom-up cataloguing failed. Step 2 caught it instantly — grey cells in otherwise uniform-colour blocks are anomalies. Rule: repair by filling grey cells with the surrounding block colour. One sentence, zero special cases.
 
 **Worked example (4522001f):** An L-shape of green cells with a single red corner. Step 2 catches the red cell as anomaly, but "fix the anomaly" is not enough — fixing it gives a solid green block, which is not the output. Only by holding input and output together does the rule emerge: double the L-shape into a solid block; place a second identical copy with its inner corner adjacent to the free corner of the first block (the corner not touching the input border), and its outer sides bounded by black or the grid edge. The red cell is not an independent marker — it IS the free corner, fully derivable from the L-shape geometry alone.
+
+**Worked example (150deff5):** All-grey irregular shape. Steps 1–2 give nothing. Step 3 with the first pair as legend: the output fills the grey region with exactly two tile types — 2×2 cyan blocks and 3×1 red strips. The first pair's output is the legend. Later pairs tile different grey shapes using the same two tile types. Rule: pack the grey region with 2×2 cyan and 3×1 (or 1×3) red tiles, no overlaps, no gaps.
+
+## Recurring structural patterns
+
+These patterns appear across dozens of tasks. Recognising the structure immediately suggests the transformation — check these before running the 4 steps.
+
+**Regular grid of separator lines.** If a distinct colour forms continuous horizontal and vertical lines dividing the grid into a regular array of same-size cells, the rule operates per-cell. Common variants:
+- One cell is the "master" (densest or most complex); the rule stamps a recoloured copy of the master into every other cell.
+- Cells are selected, filtered, or ranked by a property (count, colour, uniformity, size).
+- Related: if one cell is already fully coloured and others have single indicator cells, the indicator colour maps to a position within the master template (STAMP_MASTER pattern).
+
+**Two equal halves with separator.** If the input is split into two equal halves by a uniform single-colour separator line (row or column), the output is almost certainly a logical combination of the two halves: AND (output is non-zero where *both* halves are non-zero), OR (where *either* is non-zero), or XOR (where *exactly one* is non-zero). Check AND first — it is most common.
+
+**Template + indicator map (MOVE_TO_STATIC family).** If the input contains a small isolated template shape *and* a sparse map of coloured indicator cells at specific positions on a background grid, the output places a copy of the template at every grid position marked by an indicator cell (often recoloured to match the indicator colour). This "stamp-where-indicated" pattern covers the majority of MOVE_TO_STATIC tasks (~76 tasks).
+
+**Extension by period.** If the output is longer than the input in one dimension and begins with the same content, find the repeating unit in the input sequence and continue it. The period is usually short (2–4 cells). Check rows, columns, and diagonals independently. Task 017c7c7b exemplifies this along a diagonal.
+
+**Extract the unique object.** When multiple objects/regions exist in the input and one is distinguished by a property not shared by any other (unique colour, unique size, unique shape, unique hole, only one touching the border), the output is that unique object, typically cropped to its bounding box or centred in the output. Apply step 2 ("What doesn't belong?") to find it — but note that "unique" here means structurally unique, not just visually prominent.
+
+**Input encodes its own output size via a border legend.** If the input contains a marginal annotation — an L-shaped border, a full edge row/column, or a corner region — whose colours or segment counts vary across training pairs while the core content stays the same, that annotation is a scale key. Count the distinct colours (or segments) in the annotation to derive the expansion factor; the first two training pairs together establish the mapping. Task 469497ad exemplifies this: the right column and bottom row form an L-border whose distinct-colour count equals (scale − 1), and the output is the full input scaled by that factor with diagonal marker rays added.
 
 ## Environment setup
 

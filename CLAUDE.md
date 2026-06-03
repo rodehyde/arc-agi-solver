@@ -56,7 +56,11 @@ When analysing an unknown task or bucket of tasks, run these steps **in order** 
 
 Only after steps 1–4 fail to yield a hypothesis: enumerate colours, shapes, and spatial features bottom-up.
 
+**Verification is mandatory before claiming HIGH confidence.** A rule described in words is a hypothesis. It only becomes HIGH confidence when a Python implementation produces zero mismatches across all training pairs. Write the solver inline, run it, and report the per-pair match results. If any pair fails, revise the rule — do not report HIGH confidence on a partial match. MEDIUM confidence means the rule has not been code-verified or has known gaps.
+
 **Read the training pairs in order — the first pair is often a legend.** When the first pair's output recolours a single-colour shape into two or more clearly geometric sub-shapes (e.g., 2×2 blocks and 3×1 strips), those shapes are the *tile types*, *stamps*, or *tools* available for the transformation. Later pairs are then instances of the same packing or placement rule applied to different inputs. If the first pair looks simpler or more structured than the rest, treat it as a worked example embedded inside the training data.
+
+**Batch analysis with a subagent.** When delegating a batch of tasks to an Explore subagent, the prompt must require code verification — not just verbal description. The subagent has Bash access and can run Python. A well-formed subagent prompt should ask it to: (1) read the raw grid numbers for each task, (2) apply the 4-step protocol, (3) write a candidate `solve(inp)` function, (4) run it against all training pairs, and (5) report the per-pair match results. Any task that doesn't produce `True` for every pair must be marked MEDIUM or lower. Tasks returned as HIGH confidence without code verification should be treated as MEDIUM until verified.
 
 **Worked example (5bd6f4ac):** Bottom-up cataloguing failed. Step 2 caught it instantly — grey cells in otherwise uniform-colour blocks are anomalies. Rule: repair by filling grey cells with the surrounding block colour. One sentence, zero special cases.
 

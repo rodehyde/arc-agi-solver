@@ -1539,6 +1539,425 @@ _solve_rotation_complete        = _make_category_solver(_solve_fn_rotation_compl
 _solve_stamp_rotated            = _make_category_solver(_solve_fn_stamp_rotated)
 
 
+def _solve_fn_sep_grid_connect(inp):
+    """Separator-grid row/column connect: fill cells between same-colour pairs.
+
+    Detects a regular separator grid (single colour forming full rows and columns).
+    For each pair of same-colour cells in the same cell-row or cell-column, fills
+    all cells between them (inclusive) with that colour.
+    """
+    H, W = len(inp), len(inp[0])
+    if H < 3 or W < 3:
+        return None
+
+    # Find separator colour: a colour forming at least one complete row AND column
+    sep_colour = None
+    for r in range(H):
+        colours = set(inp[r])
+        if len(colours) == 1 and list(colours)[0] != 0:
+            cand = list(colours)[0]
+            # Verify it also appears as full columns somewhere
+            if any(all(inp[rr][c] == cand for rr in range(H)) for c in range(W)):
+                sep_colour = cand
+                break
+    if sep_colour is None:
+        return None
+
+    sep_rows = set(r for r in range(H) if all(inp[r][c] == sep_colour for c in range(W)))
+    sep_cols = set(c for c in range(W) if all(inp[r][c] == sep_colour for r in range(H)))
+    if not sep_rows or not sep_cols:
+        return None
+
+    # Build cell row / col groups
+    def _groups(n, seps):
+        groups, start = [], None
+        for i in range(n):
+            if i in seps:
+                if start is not None:
+                    groups.append((start, i - 1))
+                    start = None
+            else:
+                if start is None:
+                    start = i
+        if start is not None:
+            groups.append((start, n - 1))
+        return groups
+
+    row_groups = _groups(H, sep_rows)
+    col_groups = _groups(W, sep_cols)
+    if len(row_groups) < 2 or len(col_groups) < 2:
+        return None
+
+    # Build cell colour grid
+    def cell_colour(i, j):
+        r0, r1 = row_groups[i]
+        c0, c1 = col_groups[j]
+        colours = {inp[r][c] for r in range(r0, r1+1)
+                   for c in range(c0, c1+1)
+                   if inp[r][c] != 0 and inp[r][c] != sep_colour}
+        if len(colours) > 1:
+            return None
+        return colours.pop() if colours else 0
+
+    nr, nc = len(row_groups), len(col_groups)
+    cg = [[cell_colour(i, j) for j in range(nc)] for i in range(nr)]
+    if any(cg[i][j] is None for i in range(nr) for j in range(nc)):
+        return None
+
+    # Fill between same-colour pairs in same row or column
+    filled = [row[:] for row in cg]
+    for i in range(nr):
+        row_vals = cg[i]
+        for colour in {v for v in row_vals if v}:
+            positions = [j for j, v in enumerate(row_vals) if v == colour]
+            if len(positions) >= 2:
+                for j in range(min(positions), max(positions) + 1):
+                    if filled[i][j] == 0:
+                        filled[i][j] = colour
+
+    for j in range(nc):
+        col_vals = [cg[i][j] for i in range(nr)]
+        for colour in {v for v in col_vals if v}:
+            positions = [i for i, v in enumerate(col_vals) if v == colour]
+            if len(positions) >= 2:
+                for i in range(min(positions), max(positions) + 1):
+                    if filled[i][j] == 0:
+                        filled[i][j] = colour
+
+    # No change → not this solver
+    if filled == cg:
+        return None
+
+    # Reconstruct output grid
+    out = [row[:] for row in inp]
+    for i in range(nr):
+        r0, r1 = row_groups[i]
+        for j in range(nc):
+            c0, c1 = col_groups[j]
+            if filled[i][j] != cg[i][j]:
+                for r in range(r0, r1 + 1):
+                    for c in range(c0, c1 + 1):
+                        out[r][c] = filled[i][j]
+    return out
+
+
+_solve_sep_grid_connect = _make_category_solver(_solve_fn_sep_grid_connect)
+
+
+def _solve_fn_gravity_down(inp):
+    """Gravity down: each column's non-zero cells fall to the bottom, preserving order."""
+    H, W = len(inp), len(inp[0])
+    out = [[0] * W for _ in range(H)]
+    for c in range(W):
+        non_zero = [inp[r][c] for r in range(H) if inp[r][c] != 0]
+        for k, v in enumerate(non_zero):
+            out[H - len(non_zero) + k][c] = v
+    return out
+
+
+_solve_gravity_down = _make_category_solver(_solve_fn_gravity_down)
+
+
+def _solve_fn_sep_grid_stamp_master(inp):
+    """Separator-grid stamp-master: stamp densest cell's shape into every other cell.
+
+    Finds the cell with the most non-zero content (the master). For every other
+    cell, stamps the master's shape: positions that are empty get the separator
+    colour; positions already filled keep their existing colour.
+    """
+    H, W = len(inp), len(inp[0])
+    if H < 3 or W < 3:
+        return None
+
+    # Find separator colour
+    sep_colour = None
+    for r in range(H):
+        cs = set(inp[r])
+        if len(cs) == 1 and list(cs)[0] != 0:
+            cand = list(cs)[0]
+            if any(all(inp[rr][c] == cand for rr in range(H)) for c in range(W)):
+                sep_colour = cand
+                break
+    if sep_colour is None:
+        return None
+
+    sep_rows = set(r for r in range(H) if all(inp[r][c] == sep_colour for c in range(W)))
+    sep_cols = set(c for c in range(W) if all(inp[r][c] == sep_colour for r in range(H)))
+
+    def build_groups(n, seps):
+        groups, start = [], None
+        for i in range(n):
+            if i in seps:
+                if start is not None:
+                    groups.append((start, i - 1)); start = None
+            else:
+                if start is None:
+                    start = i
+        if start is not None:
+            groups.append((start, n - 1))
+        return groups
+
+    rg = build_groups(H, sep_rows)
+    cg = build_groups(W, sep_cols)
+    nr, nc = len(rg), len(cg)
+    if nr < 2 or nc < 2:
+        return None
+
+    cr = rg[0][1] - rg[0][0] + 1  # cell height
+    cc = cg[0][1] - cg[0][0] + 1  # cell width
+    if any(g[1] - g[0] + 1 != cr for g in rg) or any(g[1] - g[0] + 1 != cc for g in cg):
+        return None  # non-uniform cells
+
+    def cell_nonzero(i, j):
+        r0, c0 = rg[i][0], cg[j][0]
+        return {(dr, dc) for dr in range(cr) for dc in range(cc)
+                if inp[r0 + dr][c0 + dc] != 0}
+
+    # Find master (most non-zero content cells)
+    master_pos, best_count, mi, mj = set(), 0, 0, 0
+    for i in range(nr):
+        for j in range(nc):
+            pos = cell_nonzero(i, j)
+            if len(pos) > best_count:
+                best_count, master_pos, mi, mj = len(pos), pos, i, j
+    if best_count == 0:
+        return None
+
+    # Stamp master pattern into every cell; preserve existing non-zero content
+    changed = False
+    out = [row[:] for row in inp]
+    for i in range(nr):
+        for j in range(nc):
+            r0, c0 = rg[i][0], cg[j][0]
+            for (dr, dc) in master_pos:
+                if inp[r0 + dr][c0 + dc] == 0:
+                    out[r0 + dr][c0 + dc] = sep_colour
+                    changed = True
+    if not changed:
+        return None
+    return out
+
+
+_solve_sep_grid_stamp_master = _make_category_solver(_solve_fn_sep_grid_stamp_master)
+
+
+def _solve_fn_diagonal_stamp_extend(inp):
+    """2×2 bounding box with one main colour + colour-2 corner indicators.
+
+    Each corner of the 2×2 box that holds colour 2 indicates a diagonal extension
+    direction. The box is stamped repeatedly in each indicated direction (all cells
+    become the main colour) until out of bounds.
+    Corner → direction: TL(-1,-1), TR(-1,+1), BL(+1,-1), BR(+1,+1).
+    """
+    H, W = len(inp), len(inp[0])
+    # Find all non-zero cells
+    nz = [(r, c, inp[r][c]) for r in range(H) for c in range(W) if inp[r][c] != 0]
+    if not nz:
+        return None
+    colours = {v for _, _, v in nz}
+    if 2 not in colours or len(colours) < 2:
+        return None
+
+    non2_cells = [(r, c) for r, c, v in nz if v != 2]
+    two_cells  = [(r, c) for r, c, v in nz if v == 2]
+    non2_colours = {inp[r][c] for r, c in non2_cells}
+    if len(non2_colours) != 1:
+        return None
+    main_colour = next(iter(non2_colours))
+
+    # Bounding box of all non-zero cells must be exactly 2×2
+    all_cells = non2_cells + two_cells
+    r_min = min(r for r, c in all_cells)
+    r_max = max(r for r, c in all_cells)
+    c_min = min(c for r, c in all_cells)
+    c_max = max(c for r, c in all_cells)
+    if r_max - r_min != 1 or c_max - c_min != 1:
+        return None
+    # All 4 corners must be covered by non-zero cells
+    corners = {(r_min, c_min), (r_min, c_max), (r_max, c_min), (r_max, c_max)}
+    if set(all_cells) != corners:
+        return None
+
+    # Directions indicated by corners that hold colour 2
+    corner_dir = {
+        (r_min, c_min): (-1, -1),
+        (r_min, c_max): (-1, +1),
+        (r_max, c_min): (+1, -1),
+        (r_max, c_max): (+1, +1),
+    }
+    directions = [corner_dir[pos] for pos in two_cells if pos in corner_dir]
+    if not directions:
+        return None
+
+    out = [[0] * W for _ in range(H)]
+    # Stamp the 2×2 box (all cells → main colour) at each step in each direction
+    def stamp(r0, c0):
+        for dr in range(2):
+            for dc in range(2):
+                r, c = r0 + dr, c0 + dc
+                if 0 <= r < H and 0 <= c < W:
+                    out[r][c] = main_colour
+
+    stamp(r_min, c_min)  # step 0
+    for dr, dc in directions:
+        step = 1
+        while True:
+            nr0, nc0 = r_min + dr * step, c_min + dc * step
+            # Check at least one cell of the 2×2 box is in bounds
+            if not any(0 <= nr0 + i < H and 0 <= nc0 + j < W for i in range(2) for j in range(2)):
+                break
+            stamp(nr0, nc0)
+            step += 1
+
+    return out
+
+
+_solve_diagonal_stamp_extend = _make_category_solver(_solve_fn_diagonal_stamp_extend)
+
+
+def _solve_fn_project_onto_rect(inp):
+    """Isolated cells project onto the nearest face of the solid-8 rectangle.
+
+    The rectangle is the connected solid block of colour 8. Each isolated non-8 cell
+    not inside the rectangle projects onto the rectangle's border cell at the same
+    row (left/right face) or column (top/bottom face). The border cell is recoloured
+    to the isolated cell's colour. Whichever projection lands on a border cell is used;
+    if both row and column projections are possible, prefer the shorter distance.
+    """
+    H, W = len(inp), len(inp[0])
+    # Find the 8-rectangle bounding box
+    eight_cells = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == 8]
+    if not eight_cells:
+        return None
+    r0 = min(r for r, c in eight_cells)
+    r1 = max(r for r, c in eight_cells)
+    c0 = min(c for r, c in eight_cells)
+    c1 = max(c for r, c in eight_cells)
+    # Verify it's solid
+    if any(inp[r][c] != 8 for r in range(r0, r1+1) for c in range(c0, c1+1)):
+        return None
+
+    # Find isolated non-zero non-8 cells (outside the rectangle)
+    isolated = [(r, c) for r in range(H) for c in range(W)
+                if inp[r][c] != 0 and inp[r][c] != 8
+                and not (r0 <= r <= r1 and c0 <= c <= c1)]
+    if not isolated:
+        return None
+
+    out = [row[:] for row in inp]
+    changed = False
+    for r, c in isolated:
+        colour = inp[r][c]
+        # Column projection (above/below the rectangle)
+        if c0 <= c <= c1:
+            if r < r0:  # above → project onto top face
+                out[r0][c] = colour; changed = True
+            elif r > r1:  # below → project onto bottom face
+                out[r1][c] = colour; changed = True
+        # Row projection (left/right of the rectangle)
+        if r0 <= r <= r1:
+            if c < c0:  # left → project onto left face
+                out[r][c0] = colour; changed = True
+            elif c > c1:  # right → project onto right face
+                out[r][c1] = colour; changed = True
+
+    return out if changed else None
+
+
+_solve_project_onto_rect = _make_category_solver(_solve_fn_project_onto_rect)
+
+
+def _solve_fn_connect_diagonal_pairs(inp):
+    """Connect same-colour cell pairs on the same diagonal.
+
+    For each pair of same-colour cells where r-c is constant (main diagonal) or
+    r+c is constant (anti-diagonal), fills all cells between them on that diagonal
+    with the same colour.
+    """
+    H, W = len(inp), len(inp[0])
+    from collections import defaultdict
+    main_diag: dict = defaultdict(list)  # r-c → [(r,c)]
+    anti_diag: dict = defaultdict(list)  # r+c → [(r,c)]
+    colours: dict = {}
+
+    for r in range(H):
+        for c in range(W):
+            v = inp[r][c]
+            if v != 0:
+                colours[(r, c)] = v
+                main_diag[r - c].append((r, c))
+                anti_diag[r + c].append((r, c))
+
+    out = [row[:] for row in inp]
+    changed = False
+
+    for diag_pts, is_main in [(main_diag, True), (anti_diag, False)]:
+        for key, pts in diag_pts.items():
+            by_colour: dict = defaultdict(list)
+            for p in pts:
+                by_colour[colours[p]].append(p)
+            for colour, cpts in by_colour.items():
+                if len(cpts) < 2:
+                    continue
+                cpts_sorted = sorted(cpts)
+                r_start, c_start = cpts_sorted[0]
+                steps = cpts_sorted[-1][0] - r_start
+                for k in range(steps + 1):
+                    r = r_start + k
+                    c = c_start + k if is_main else c_start - k
+                    if inp[r][c] == 0:
+                        out[r][c] = colour
+                        changed = True
+
+    return out if changed else None
+
+
+_solve_connect_diagonal_pairs = _make_category_solver(_solve_fn_connect_diagonal_pairs)
+
+
+def _solve_fn_nearest_border_fill(inp):
+    """Colour-3 indicators replaced by the colour of the nearer of two opposite borders.
+
+    Detects two opposite full-row (or full-column) borders of different non-zero,
+    non-3 colours. Each interior cell of colour 3 is replaced by the border colour
+    that is closer (measured in rows for row borders, columns for column borders).
+    """
+    H, W = len(inp), len(inp[0])
+    # Try row borders
+    full_rows = [(r, inp[r][0]) for r in range(H)
+                 if all(inp[r][c] == inp[r][0] for c in range(W)) and inp[r][0] != 0]
+    if len(full_rows) == 2:
+        (r1, c1), (r2, c2) = full_rows[0], full_rows[1]
+        if c1 != c2 and c1 != 3 and c2 != 3:
+            out = [row[:] for row in inp]
+            for r in range(H):
+                for c in range(W):
+                    if inp[r][c] == 3:
+                        d1 = abs(r - r1)
+                        d2 = abs(r - r2)
+                        out[r][c] = c1 if d1 <= d2 else c2
+            return out
+
+    # Try column borders
+    full_cols = [(c, inp[0][c]) for c in range(W)
+                 if all(inp[r][c] == inp[0][c] for r in range(H)) and inp[0][c] != 0]
+    if len(full_cols) == 2:
+        (c1, v1), (c2, v2) = full_cols[0], full_cols[1]
+        if v1 != v2 and v1 != 3 and v2 != 3:
+            out = [row[:] for row in inp]
+            for r in range(H):
+                for c in range(W):
+                    if inp[r][c] == 3:
+                        d1 = abs(c - c1)
+                        d2 = abs(c - c2)
+                        out[r][c] = v1 if d1 <= d2 else v2
+            return out
+    return None
+
+
+_solve_nearest_border_fill = _make_category_solver(_solve_fn_nearest_border_fill)
+
+
 def _always(d): return True  # noqa: E731  — permissive pre-filter; verify() is the gate
 
 
@@ -1598,6 +2017,13 @@ ALL_PRIMITIVES = [
     ("STAMP_WITH_ARMS",               _always, _solve_stamp_with_arms),
     ("ROTATION_COMPLETE",             _always, _solve_rotation_complete),
     ("STAMP_ROTATED",                 _always, _solve_stamp_rotated),
+    ("SEP_GRID_CONNECT",              _always, _solve_sep_grid_connect),
+    ("GRAVITY_DOWN",                  _always, _solve_gravity_down),
+    ("SEP_GRID_STAMP_MASTER",         _always, _solve_sep_grid_stamp_master),
+    ("DIAGONAL_STAMP_EXTEND",         _always, _solve_diagonal_stamp_extend),
+    ("PROJECT_ONTO_RECT",             _always, _solve_project_onto_rect),
+    ("CONNECT_DIAGONAL_PAIRS",        _always, _solve_connect_diagonal_pairs),
+    ("NEAREST_BORDER_FILL",           _always, _solve_nearest_border_fill),
 ]
 
 

@@ -58,6 +58,14 @@ from src.categories.line_fill_by_colour import (
 from src.categories.row_fill_meet_middle import (
     detect_row_fill_meet_middle, solve_row_fill_meet_middle,
 )
+from src.categories.connect_aligned_pairs import (
+    detect_connect_aligned_pairs, solve_connect_aligned_pairs,
+)
+from src.categories.geometric_transforms import solve_geometric_transform
+from src.categories.logical_ops import solve_logical_op
+from src.categories.colour_remap import solve_colour_remap
+from src.categories.quadrant_mirror import solve_quadrant_mirror
+from src.categories.tiling import solve_tile_fill
 
 TRAINING_DIR = Path(__file__).parent.parent / "data" / "training"
 
@@ -875,6 +883,22 @@ def _make_category_solver(solve_fn):
     return _solve
 
 
+def _make_task_solver(solve_fn):
+    """Variant of _make_category_solver for solvers that need the full task context
+    (e.g. to infer colours from training pairs). solve_fn signature: (inp, task)."""
+    def _solve(task: dict):
+        results = []
+        for tp in task["test"]:
+            inp = tp["input"]
+            inp_list = inp.tolist() if hasattr(inp, "tolist") else inp
+            out = solve_fn(inp_list, task)
+            if out is None:
+                return None
+            results.append(np.array(out, dtype=np.uint8))
+        return results
+    return _solve
+
+
 _solve_rectangle_from_corners   = _make_category_solver(solve_rectangle_from_corners)
 _solve_gap_bridge               = _make_category_solver(solve_gap_bridge)
 _solve_separator_grid_cross     = _make_category_solver(solve_separator_grid_cross_fill)
@@ -888,6 +912,631 @@ _solve_quadrant_reflect         = _make_category_solver(solve_quadrant_reflect)
 _solve_self_tile                = _make_category_solver(solve_self_tile)
 _solve_line_fill_by_colour      = _make_category_solver(solve_line_fill_by_colour)
 _solve_row_fill_meet_middle     = _make_category_solver(solve_row_fill_meet_middle)
+_solve_connect_aligned_pairs    = _make_task_solver(solve_connect_aligned_pairs)
+_solve_quadrant_mirror          = _make_category_solver(solve_quadrant_mirror)
+_solve_geometric_transform      = _make_task_solver(solve_geometric_transform)
+_solve_logical_op               = _make_task_solver(solve_logical_op)
+_solve_colour_remap             = _make_task_solver(solve_colour_remap)
+_solve_tile_fill                = _make_category_solver(solve_tile_fill)
+
+
+# ── Batch-1 task-specific solvers ─────────────────────────────────────────────
+#
+# All functions below take inp as a list-of-lists and return list-of-lists.
+# Wrapped via _make_category_solver() so verify() gates them properly.
+
+def _solve_fn_diagonal_tile(inp):
+    """Anti-diagonal tiling: out[r][c] = seq[(r+c) % period]."""
+    H, W = len(inp), len(inp[0])
+    diags: dict[int, int] = {}
+    for r in range(H):
+        for c in range(W):
+            v = inp[r][c]
+            if v != 0:
+                d = r + c
+                if d in diags and diags[d] != v:
+                    return None
+                diags[d] = v
+    if not diags:
+        return None
+    n_vals = len(set(diags.values()))
+    # Find minimum period: smallest P >= n_vals with no conflicts and full coverage
+    period = None
+    for P in range(n_vals, H + W + 1):
+        seq_map: dict[int, int] = {}
+        conflict = False
+        for d, v in diags.items():
+            m = d % P
+            if m in seq_map and seq_map[m] != v:
+                conflict = True; break
+            seq_map[m] = v
+        if not conflict and len(seq_map) == P:
+            period = P
+            break
+    if period is None:
+        return None
+    seq_map = {d % period: v for d, v in diags.items()}
+    return [[seq_map[(r + c) % period] for c in range(W)] for r in range(H)]
+
+
+def _solve_fn_repeating_stripes(inp):
+    """Two marker cells define alternating stripes (column or row) extending from markers."""
+    H, W = len(inp), len(inp[0])
+    markers = [(r, c, inp[r][c]) for r in range(H) for c in range(W) if inp[r][c] != 0]
+    if len(markers) != 2:
+        return None
+    m1, m2 = markers[0], markers[1]
+    r1, c1, v1 = m1
+    r2, c2, v2 = m2
+    row_gap = abs(r2 - r1)
+    col_gap = abs(c2 - c1)
+    out = [[0] * W for _ in range(H)]
+    if 0 < col_gap <= row_gap:
+        # Column stripes: markers define which columns to fill
+        if c1 > c2:
+            c1, c2, v1, v2 = c2, c1, v2, v1
+        gap = c2 - c1
+        period = 2 * gap
+        for c in range(c1, W):
+            offset = c - c1
+            if offset % period == 0:
+                for r in range(H): out[r][c] = v1
+            elif offset % period == gap:
+                for r in range(H): out[r][c] = v2
+    else:
+        # Row stripes: markers define which rows to fill
+        if r1 > r2:
+            r1, r2, v1, v2 = r2, r1, v2, v1
+        gap = r2 - r1
+        period = 2 * gap
+        for r in range(r1, H):
+            offset = r - r1
+            if offset % period == 0:
+                for c in range(W): out[r][c] = v1
+            elif offset % period == gap:
+                for c in range(W): out[r][c] = v2
+    return out
+
+
+def _solve_fn_slide_to_adjacent(inp):
+    """Non-8 shape slides toward 8-shape until bounding boxes are adjacent."""
+    H, W = len(inp), len(inp[0])
+    cells_8  = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == 8]
+    cells_nz = [(r, c) for r in range(H) for c in range(W)
+                if inp[r][c] != 0 and inp[r][c] != 8]
+    if not cells_8 or not cells_nz:
+        return None
+    r8_min = min(r for r, c in cells_8); r8_max = max(r for r, c in cells_8)
+    c8_min = min(c for r, c in cells_8); c8_max = max(c for r, c in cells_8)
+    rn_min = min(r for r, c in cells_nz); rn_max = max(r for r, c in cells_nz)
+    cn_min = min(c for r, c in cells_nz); cn_max = max(c for r, c in cells_nz)
+    dr = dc = 0
+    if   rn_max < r8_min: dr = r8_min - rn_max - 1
+    elif rn_min > r8_max: dr = r8_max - rn_min + 1
+    elif cn_max < c8_min: dc = c8_min - cn_max - 1
+    elif cn_min > c8_max: dc = c8_max - cn_min + 1
+    else: return None
+    out = [[0] * W for _ in range(H)]
+    for r, c in cells_8:
+        out[r][c] = 8
+    for r, c in cells_nz:
+        nr, nc = r + dr, c + dc
+        if 0 <= nr < H and 0 <= nc < W:
+            out[nr][nc] = inp[r][c]
+    return out
+
+
+def _solve_fn_extract_unique_region(inp):
+    """Crop to the rectangular region containing the colour unique to that region."""
+    H, W = len(inp), len(inp[0])
+    zero_rows = set(r for r in range(H) if all(inp[r][c] == 0 for c in range(W)))
+    zero_cols = set(c for c in range(W) if all(inp[r][c] == 0 for r in range(H)))
+
+    def segments(zeros, total):
+        segs, start = [], None
+        for i in range(total):
+            if i not in zeros:
+                if start is None: start = i
+            elif start is not None:
+                segs.append((start, i)); start = None
+        if start is not None: segs.append((start, total))
+        return segs
+
+    row_segs = segments(zero_rows, H)
+    col_segs = segments(zero_cols, W)
+    if not row_segs or not col_segs:
+        return None
+
+    from collections import Counter
+    colour_count: Counter = Counter()
+    region_colours: dict = {}
+    for r0, r1 in row_segs:
+        for c0, c1 in col_segs:
+            colours = set(inp[r][c] for r in range(r0, r1) for c in range(c0, c1)
+                          if inp[r][c] != 0)
+            region_colours[(r0, r1, c0, c1)] = colours
+            colour_count.update(colours)
+
+    unique = {col for col, cnt in colour_count.items() if cnt == 1}
+    if not unique:
+        return None
+    for (r0, r1, c0, c1), colours in region_colours.items():
+        if colours & unique:
+            return [list(inp[r][c0:c1]) for r in range(r0, r1)]
+    return None
+
+
+def _solve_fn_extend_period(inp):
+    """Extend a periodic row pattern by H//2 rows, recolouring 1→2."""
+    H, W = len(inp), len(inp[0])
+    period = H
+    for P in range(1, H):
+        if all(inp[i] == inp[i % P] for i in range(H)):
+            period = P
+            break
+    out_H = H * 3 // 2
+    out = []
+    for i in range(out_H):
+        row = [2 if v == 1 else v for v in inp[i % period]]
+        out.append(row)
+    return out
+
+
+# ── Agent-verified solvers (tasks 10fcaaa3 – 1caeab9d) ───────────────────────
+
+def _solve_fn_diagonal_tile_2x2(inp):
+    """Tile input 2×2; fill empty cells with colour 8 where diag-adjacent to non-zero."""
+    H, W = len(inp), len(inp[0])
+    tiled = [[inp[r % H][c % W] for c in range(2 * W)] for r in range(2 * H)]
+    result = [row[:] for row in tiled]
+    for r in range(2 * H):
+        for c in range(2 * W):
+            if tiled[r][c] == 0:
+                for dr, dc in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < 2 * H and 0 <= nc < 2 * W and tiled[nr][nc] != 0:
+                        result[r][c] = 8
+                        break
+    return result
+
+
+def _solve_fn_complete_reflection(inp):
+    """Complete 2D symmetry around the centre of the non-zero bounding box."""
+    H, W = len(inp), len(inp[0])
+    nz_rows = [r for r in range(H) if any(inp[r][c] != 0 for c in range(W))]
+    nz_cols = [c for c in range(W) if any(inp[r][c] != 0 for r in range(H))]
+    if not nz_rows or not nz_cols:
+        return [row[:] for row in inp]
+    row_axis = (nz_rows[0] + nz_rows[-1]) / 2.0
+    col_axis = (nz_cols[0] + nz_cols[-1]) / 2.0
+    result = [row[:] for row in inp]
+    for r in range(H):
+        for c in range(W):
+            v = inp[r][c]
+            if v != 0:
+                for nr in {r, int(round(2 * row_axis - r))}:
+                    for nc in {c, int(round(2 * col_axis - c))}:
+                        if 0 <= nr < H and 0 <= nc < W:
+                            result[nr][nc] = v
+    return result
+
+
+def _solve_fn_sep_grid_dimensions(inp):
+    """Separator-colour lines form a grid; output = (row_bands × col_bands) of bg colour."""
+    from collections import Counter
+    H, W = len(inp), len(inp[0])
+    all_vals = [v for row in inp for v in row]
+    sep_color = None
+    for color in set(all_vals) - {0}:
+        if any(all(inp[r][c] == color for c in range(W)) for r in range(H)):
+            sep_color = color; break
+        if any(all(inp[r][c] == color for r in range(H)) for c in range(W)):
+            sep_color = color; break
+    if sep_color is None:
+        return None
+    sep_rows = [r for r in range(H) if all(inp[r][c] == sep_color for c in range(W))]
+    sep_cols = [c for c in range(W) if all(inp[r][c] == sep_color for r in range(H))]
+    n_row_bands = len(sep_rows) + 1
+    n_col_bands = len(sep_cols) + 1
+    bg_counts = Counter(v for v in all_vals if v != 0 and v != sep_color)
+    if not bg_counts:
+        return None
+    bg = bg_counts.most_common(1)[0][0]
+    return [[bg] * n_col_bands for _ in range(n_row_bands)]
+
+
+def _solve_fn_overlay_neighbourhood(inp):
+    """Overlay 3×3 neighbourhood of every colour-5 cell onto a shared 3×3 output."""
+    H, W = len(inp), len(inp[0])
+    result = [[0] * 3 for _ in range(3)]
+    for r in range(H):
+        for c in range(W):
+            if inp[r][c] == 5:
+                for dr in range(-1, 2):
+                    for dc in range(-1, 2):
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < H and 0 <= nc < W and inp[nr][nc] != 0:
+                            result[1 + dr][1 + dc] = inp[nr][nc]
+    return result
+
+
+def _solve_fn_tile_pack_grey(inp):
+    """Pack grey (5) region with 2×2 (→8) and 3×1/1×3 (→2) tiles via backtracking."""
+    H, W = len(inp), len(inp[0])
+    target = frozenset((r, c) for r in range(H) for c in range(W) if inp[r][c] == 5)
+    if not target:
+        return [row[:] for row in inp]
+    cells_sorted = sorted(target)
+
+    def next_cell(filled):
+        for pos in cells_sorted:
+            if pos not in filled:
+                return pos
+        return None
+
+    def backtrack(filled):
+        pos = next_cell(filled)
+        if pos is None:
+            return filled
+        r, c = pos
+        for blocks, val in [
+            ([(r, c), (r, c+1), (r+1, c), (r+1, c+1)], 8),  # 2×2
+            ([(r, c), (r, c+1), (r, c+2)], 2),               # 1×3
+            ([(r, c), (r+1, c), (r+2, c)], 2),               # 3×1
+        ]:
+            if all(
+                0 <= br < H and 0 <= bc < W and (br, bc) in target and (br, bc) not in filled
+                for br, bc in blocks
+            ):
+                nf = dict(filled)
+                for br, bc in blocks:
+                    nf[(br, bc)] = val
+                res = backtrack(nf)
+                if res is not None:
+                    return res
+        return None
+
+    solution = backtrack({})
+    result = [row[:] for row in inp]
+    if solution:
+        for (r, c), val in solution.items():
+            result[r][c] = val
+    return result
+
+
+def _solve_fn_snap_to_separator(inp):
+    """Move stray sep-colour cells to the adjacent position nearest their separator line."""
+    H, W = len(inp), len(inp[0])
+    sep_rows: dict[int, list] = {}
+    sep_cols: dict[int, list] = {}
+    for r in range(H):
+        vals = set(inp[r][c] for c in range(W))
+        if len(vals) == 1 and 0 not in vals:
+            col = next(iter(vals))
+            sep_rows.setdefault(col, []).append(r)
+    for c in range(W):
+        vals = set(inp[r][c] for r in range(H))
+        if len(vals) == 1 and 0 not in vals:
+            col = next(iter(vals))
+            sep_cols.setdefault(col, []).append(c)
+
+    result = [[0] * W for _ in range(H)]
+    sep_row_set = set(r for v in sep_rows.values() for r in v)
+    sep_col_set = set(c for v in sep_cols.values() for c in v)
+    for color, rows in sep_rows.items():
+        for r in rows:
+            for c in range(W):
+                result[r][c] = color
+    for color, cols in sep_cols.items():
+        for sc in cols:
+            for r in range(H):
+                result[r][sc] = color
+
+    all_sep_colors = set(sep_rows) | set(sep_cols)
+    for r in range(H):
+        if r in sep_row_set:
+            continue
+        for c in range(W):
+            if c in sep_col_set:
+                continue
+            val = inp[r][c]
+            if val == 0 or val not in all_sep_colors:
+                continue
+            best_dist, best_pos = float('inf'), None
+            for sr in sep_rows.get(val, []):
+                d = abs(r - sr)
+                if d < best_dist:
+                    best_dist = d
+                    best_pos = (sr - 1 if r < sr else sr + 1, c)
+            for sc in sep_cols.get(val, []):
+                d = abs(c - sc)
+                if d < best_dist:
+                    best_dist = d
+                    best_pos = (r, sc - 1 if c < sc else sc + 1)
+            if best_pos:
+                nr, nc = best_pos
+                if 0 <= nr < H and 0 <= nc < W:
+                    result[nr][nc] = val
+    return result
+
+
+def _solve_fn_two_dot_frame(inp):
+    """Two input dots define upper/lower half frame borders."""
+    H, W = len(inp), len(inp[0])
+    dots = sorted(
+        [(inp[r][c], r) for r in range(H) for c in range(W) if inp[r][c] != 0],
+        key=lambda x: x[1]
+    )
+    if len(dots) != 2:
+        return None
+    (c1, r1), (c2, r2) = dots[0], dots[1]
+    mid = (r1 + r2) // 2
+    result = [[0] * W for _ in range(H)]
+    for r in range(H):
+        if r <= mid:
+            color = c1
+            full = (r == 0 or r == r1)
+        else:
+            color = c2
+            full = (r == r2 or r == H - 1)
+        if full:
+            for c in range(W):
+                result[r][c] = color
+        else:
+            result[r][0] = color
+            result[r][W - 1] = color
+    return result
+
+
+def _solve_fn_extract_interior(inp):
+    """Output the cells strictly inside the rectangular border of a single colour."""
+    from collections import defaultdict
+    H, W = len(inp), len(inp[0])
+    color_cells: dict = defaultdict(list)
+    for r in range(H):
+        for c in range(W):
+            if inp[r][c] != 0:
+                color_cells[inp[r][c]].append((r, c))
+    for color, cells in color_cells.items():
+        rows = [r for r, c in cells]
+        cols = [c for r, c in cells]
+        r0, r1 = min(rows), max(rows)
+        c0, c1 = min(cols), max(cols)
+        if r1 - r0 < 2 or c1 - c0 < 2:
+            continue
+        border = set()
+        for r in range(r0, r1 + 1):
+            border.add((r, c0)); border.add((r, c1))
+        for c in range(c0, c1 + 1):
+            border.add((r0, c)); border.add((r1, c))
+        if set(cells) == border:
+            return [[inp[r][c] for c in range(c0 + 1, c1)] for r in range(r0 + 1, r1)]
+    return None
+
+
+def _solve_fn_stamp_rotated(inp):
+    """Connected template shapes + isolated marker cells. Find the D4 rotation/reflection
+    that aligns each template's special (non-skeleton) cells with a marker set, then place
+    each template in that orientation. Everything else is cleared."""
+    H, W = len(inp), len(inp[0])
+    from collections import Counter
+    cells = {(r, c): inp[r][c] for r in range(H) for c in range(W) if inp[r][c] != 0}
+
+    def _d4(r, c, t):
+        return [(r,c),(-c,r),(-r,-c),(c,-r),(r,-c),(-c,-r),(-r,c),(c,r)][t]
+
+    markers = {p: v for p, v in cells.items()
+               if not any((p[0]+dr, p[1]+dc) in cells
+                          for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)])}
+
+    template_pos = set(cells) - set(markers)
+    visited = set(); templates = []
+    for start in template_pos:
+        if start in visited: continue
+        comp = {}; stack = [start]
+        while stack:
+            p = stack.pop()
+            if p in visited: continue
+            visited.add(p); comp[p] = cells[p]
+            r, c = p
+            for nr, nc in [(r-1,c),(r+1,c),(r,c-1),(r,c+1)]:
+                if (nr, nc) in template_pos and (nr, nc) not in visited:
+                    stack.append((nr, nc))
+        templates.append(comp)
+
+    out = [[0] * W for _ in range(H)]
+    for template in templates:
+        skeleton = Counter(template.values()).most_common(1)[0][0]
+        min_r = min(r for r,c in template); min_c = min(c for r,c in template)
+        norm = {(r-min_r, c-min_c): v for (r,c),v in template.items()}
+        placed = False
+        for t in range(8):
+            trans = {_d4(r,c,t): v for (r,c),v in norm.items()}
+            mr2 = min(r for r,c in trans); mc2 = min(c for r,c in trans)
+            trans = {(r-mr2, c-mc2): v for (r,c),v in trans.items()}
+            specials = [(r,c,v) for (r,c),v in trans.items() if v != skeleton]
+            if not specials: continue
+            for ar, ac, av in specials:
+                for (mpr, mpc), mv in markers.items():
+                    if mv != av: continue
+                    dr, dc = mpr-ar, mpc-ac
+                    if all(markers.get((sr+dr,sc+dc))==sv for sr,sc,sv in specials):
+                        for (r,c),v in trans.items():
+                            nr,nc = r+dr,c+dc
+                            if 0<=nr<H and 0<=nc<W:
+                                out[nr][nc] = v
+                        placed = True; break
+                if placed: break
+            if placed: break
+    return out
+
+
+def _solve_fn_rotation_complete(inp):
+    """Shape is almost 180° rotationally symmetric. Extra cells (those without a rotated
+    counterpart) are stamped at their 180°-rotated positions in colour 2."""
+    H, W = len(inp), len(inp[0])
+    from collections import Counter
+    cells = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == 1]
+    if not cells:
+        return None
+    cell_set = set(cells)
+    candidates = Counter()
+    for r1, c1 in cells:
+        for r2, c2 in cells:
+            candidates[((r1 + r2) / 2, (c1 + c2) / 2)] += 1
+    best_center, best_count = None, -1
+    for (pr, pc) in candidates:
+        matched = sum(1 for r, c in cells if (2*pr - r, 2*pc - c) in cell_set)
+        if matched > best_count:
+            best_count, best_center = matched, (pr, pc)
+    if best_center is None:
+        return None
+    pr, pc = best_center
+    out = [row[:] for row in inp]
+    for r, c in cells:
+        nr, nc = int(round(2*pr - r)), int(round(2*pc - c))
+        if (nr, nc) not in cell_set and 0 <= nr < H and 0 <= nc < W:
+            out[nr][nc] = 2
+    return out
+
+
+def _solve_fn_stamp_with_arms(inp):
+    """Template shape + marker clusters of other colours.
+    Each marker cluster is a partial copy of the template placed at the first copy position.
+    Direction inferred from offset; copies repeat (gap=1) to grid edge."""
+    H, W = len(inp), len(inp[0])
+    from collections import defaultdict
+    colour_cells = defaultdict(list)
+    for r in range(H):
+        for c in range(W):
+            v = inp[r][c]
+            if v != 0:
+                colour_cells[v].append((r, c))
+    if not colour_cells:
+        return None
+    template_colour = max(colour_cells, key=lambda v: len(colour_cells[v]))
+    template_cells = set(colour_cells[template_colour])
+    out = [row[:] for row in inp]
+
+    def _gap_is_one(tc, dr, dc):
+        copy = {(r+dr, c+dc) for r,c in tc}
+        tr = [r for r,c in tc]; tcc = [c for r,c in tc]
+        cr = [r for r,c in copy]; cc = [c for r,c in copy]
+        if dr > 0 and min(cr)-max(tr)-1 != 1: return False
+        if dr < 0 and min(tr)-max(cr)-1 != 1: return False
+        if dc > 0 and min(cc)-max(tcc)-1 != 1: return False
+        if dc < 0 and min(tcc)-max(cc)-1 != 1: return False
+        return True
+
+    def _components(cells):
+        cells = set(cells); visited = set(); comps = []
+        for start in sorted(cells):
+            if start in visited:
+                continue
+            comp = []; stack = [start]
+            while stack:
+                cell = stack.pop()
+                if cell in visited: continue
+                visited.add(cell); comp.append(cell)
+                r, c = cell
+                for nr, nc in [(r-1,c),(r+1,c),(r,c-1),(r,c+1)]:
+                    if (nr,nc) in cells and (nr,nc) not in visited:
+                        stack.append((nr,nc))
+            comps.append(comp)
+        return comps
+
+    for colour, cells in colour_cells.items():
+        if colour == template_colour:
+            continue
+        for cluster in _components(cells):
+            mr0, mc0 = cluster[0]
+            offset = None
+            for sr, sc in template_cells:
+                dr, dc = mr0-sr, mc0-sc
+                if not (dr or dc): continue
+                if not all((mr-dr,mc-dc) in template_cells for mr,mc in cluster): continue
+                if frozenset((r+dr,c+dc) for r,c in template_cells) & template_cells: continue
+                if _gap_is_one(template_cells, dr, dc):
+                    offset = (dr, dc); break
+            if offset is None:
+                continue
+            dr, dc = offset
+            n = 1
+            while True:
+                stamp = [(r+n*dr,c+n*dc) for r,c in template_cells]
+                in_bounds = [(r,c) for r,c in stamp if 0<=r<H and 0<=c<W]
+                if not in_bounds: break
+                for r,c in in_bounds:
+                    out[r][c] = colour
+                n += 1
+    return out
+
+
+def _solve_fn_parallelogram_correct(inp):
+    """Each colour component: keep bottom row + rightmost cell of second-to-last row fixed;
+    shift all other cells one column right."""
+    H, W = len(inp), len(inp[0])
+    colours = set(inp[r][c] for r in range(H) for c in range(W) if inp[r][c] != 0)
+    out = [[0] * W for _ in range(H)]
+    for colour in colours:
+        cells = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == colour]
+        max_row = max(r for r, c in cells)
+        fixed = set((r, c) for r, c in cells if r == max_row)
+        above = [(r, c) for r, c in cells if r == max_row - 1]
+        if above:
+            fixed.add(max(above, key=lambda x: x[1]))
+        for r, c in cells:
+            if (r, c) in fixed:
+                out[r][c] = colour
+            else:
+                if c + 1 >= W:
+                    return None
+                out[r][c + 1] = colour
+    return out
+
+
+def _solve_fn_align_to_anchor(inp):
+    """Shift every non-anchor colour block so its top row aligns with colour-1's top row."""
+    H, W = len(inp), len(inp[0])
+    one_cells = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == 1]
+    if not one_cells:
+        return None
+    anchor_top = min(r for r, c in one_cells)
+    result = [[0] * W for _ in range(H)]
+    for r, c in one_cells:
+        result[r][c] = 1
+    other_colors = set(inp[r][c] for r in range(H) for c in range(W)) - {0, 1}
+    for color in other_colors:
+        cells = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == color]
+        top = min(r for r, c in cells)
+        shift = anchor_top - top
+        for r, c in cells:
+            nr = r + shift
+            if 0 <= nr < H:
+                result[nr][c] = color
+    return result
+
+
+# ── Wrappers for batch-1 solvers ──────────────────────────────────────────────
+
+_solve_diagonal_tile        = _make_category_solver(_solve_fn_diagonal_tile)
+_solve_repeating_stripes    = _make_category_solver(_solve_fn_repeating_stripes)
+_solve_slide_to_adjacent    = _make_category_solver(_solve_fn_slide_to_adjacent)
+_solve_extract_unique_region = _make_category_solver(_solve_fn_extract_unique_region)
+_solve_extend_period        = _make_category_solver(_solve_fn_extend_period)
+_solve_diagonal_tile_2x2   = _make_category_solver(_solve_fn_diagonal_tile_2x2)
+_solve_complete_reflection  = _make_category_solver(_solve_fn_complete_reflection)
+_solve_sep_grid_dimensions  = _make_category_solver(_solve_fn_sep_grid_dimensions)
+_solve_overlay_neighbourhood = _make_category_solver(_solve_fn_overlay_neighbourhood)
+_solve_tile_pack_grey       = _make_category_solver(_solve_fn_tile_pack_grey)
+_solve_snap_to_separator    = _make_category_solver(_solve_fn_snap_to_separator)
+_solve_two_dot_frame        = _make_category_solver(_solve_fn_two_dot_frame)
+_solve_extract_interior     = _make_category_solver(_solve_fn_extract_interior)
+_solve_align_to_anchor          = _make_category_solver(_solve_fn_align_to_anchor)
+_solve_parallelogram_correct    = _make_category_solver(_solve_fn_parallelogram_correct)
+_solve_stamp_with_arms          = _make_category_solver(_solve_fn_stamp_with_arms)
+_solve_rotation_complete        = _make_category_solver(_solve_fn_rotation_complete)
+_solve_stamp_rotated            = _make_category_solver(_solve_fn_stamp_rotated)
 
 
 def _always(d): return True  # noqa: E731  — permissive pre-filter; verify() is the gate
@@ -909,6 +1558,7 @@ ALL_PRIMITIVES = [
     ("MIRROR_AT_MARKER",              _applies_mirror_at_marker,     _solve_mirror_at_marker),
     ("SHIFT_DOWN_ONE",                _applies_shift_down_one,       _solve_shift_down_one),
     ("CROP_BOUNDING_BOX",             _applies_crop_bounding_box,    _solve_crop_bounding_box),
+    ("LOGICAL_OP",                    _always,                       _solve_logical_op),
     ("LOGICAL_AND",                   _applies_logical_and,          _solve_logical_and),
     # ── category-module solvers ──
     ("RECTANGLE_FROM_CORNERS",        _always, _solve_rectangle_from_corners),
@@ -924,6 +1574,30 @@ ALL_PRIMITIVES = [
     ("SELF_TILE",                     _always, _solve_self_tile),
     ("LINE_FILL_BY_COLOUR",           _always, _solve_line_fill_by_colour),
     ("ROW_FILL_MEET_MIDDLE",          _always, _solve_row_fill_meet_middle),
+    ("CONNECT_ALIGNED_PAIRS",         _always, _solve_connect_aligned_pairs),
+    ("QUADRANT_MIRROR",               _always, _solve_quadrant_mirror),
+    ("GEOMETRIC_TRANSFORM",           _always, _solve_geometric_transform),
+    ("COLOUR_REMAP",                  _always, _solve_colour_remap),
+    ("TILE_FILL",                     _always, _solve_tile_fill),
+    # ── batch-1 task-specific solvers ──
+    ("DIAGONAL_TILE",                 _always, _solve_diagonal_tile),
+    ("REPEATING_STRIPES",             _always, _solve_repeating_stripes),
+    ("SLIDE_TO_ADJACENT",             _always, _solve_slide_to_adjacent),
+    ("EXTRACT_UNIQUE_REGION",         _always, _solve_extract_unique_region),
+    ("EXTEND_PERIOD",                 _always, _solve_extend_period),
+    ("DIAGONAL_TILE_2X2",             _always, _solve_diagonal_tile_2x2),
+    ("COMPLETE_REFLECTION",           _always, _solve_complete_reflection),
+    ("SEP_GRID_DIMENSIONS",           _always, _solve_sep_grid_dimensions),
+    ("OVERLAY_NEIGHBOURHOOD",         _always, _solve_overlay_neighbourhood),
+    ("TILE_PACK_GREY",                _always, _solve_tile_pack_grey),
+    ("SNAP_TO_SEPARATOR",             _always, _solve_snap_to_separator),
+    ("TWO_DOT_FRAME",                 _always, _solve_two_dot_frame),
+    ("EXTRACT_INTERIOR",              _always, _solve_extract_interior),
+    ("ALIGN_TO_ANCHOR",               _always, _solve_align_to_anchor),
+    ("PARALLELOGRAM_CORRECT",         _always, _solve_parallelogram_correct),
+    ("STAMP_WITH_ARMS",               _always, _solve_stamp_with_arms),
+    ("ROTATION_COMPLETE",             _always, _solve_rotation_complete),
+    ("STAMP_ROTATED",                 _always, _solve_stamp_rotated),
 ]
 
 

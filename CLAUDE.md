@@ -14,52 +14,64 @@ ARC puzzles are easy for humans but very hard for computers. Humans improve by r
 
 3. **Merge models** — Combine models for tasks spanning multiple categories or that resist categorisation, mimicking how humans combine prior experiences for novel puzzles.
 
-### Current state (Stage 1)
+### Current state
 
-Platform is set up: VS Code + Claude Code on macOS, Python environment, GitHub repo, ARC training/evaluation data loaded. 400 training tasks, all currently matched by at least one category.
+Platform is set up: VS Code + Claude Code on macOS, Python environment, GitHub repo, ARC training/evaluation data loaded. 400 training tasks; ~82 currently solved by rule-based solvers (68 pre-session + 14 added 2026-06-05).
 
-| Category | Tasks | % of 400 |
-|---|---|---|
-| SAME_SIZE | 262 | 66% |
-| FIXED_OUTPUT | 210 | 52% |
-| SHRINK | 101 | 25% |
-| SAME_COLOUR_COUNT | 88 | 22% |
-| GROW | 36 | 9% |
-| FIXED_OUTPUT_VARY_IN | 14 | 4% |
-| SINGLE_CELL_OUTPUT | 6 | 2% |
+**Active approach (from 2026-06-05):** Work through all unsolved training tasks one at a time. Apply the decomposition pre-step + 4-step protocol to each. Write a verified solver for every task where a rule can be derived. If stuck after one revision attempt, stop and ask the user immediately — do not stall alone.
 
-`SINGLE_CELL_OUTPUT` has been explored in detail: 6 tasks, all classification problems (given input grid → output a single colour value). The 3×3 tasks appear to classify by shape pattern; the larger-grid tasks by some dominant feature. No solver built yet.
-
-Next focus: continue expanding the category taxonomy and begin exploring what distinguishes tasks within each category, as a precursor to building per-category solvers.
+The category taxonomy remains available for routing but is no longer a gate. The primary output is a growing library of composable solver primitives and task-specific `solve(inp)` functions registered in `scripts/solvers.py`.
 
 ### Principles
 - Categories are defined on training pairs only — never the test pair.
 - A task can belong to multiple categories; categories are not mutually exclusive.
-- Each category should eventually have a dedicated solver module.
 - Start simple; grow complexity only when simpler approaches fail.
-- **Prefer broad solvers over narrow ones.** The goal is ~20–30 general solver families that together cover most tasks — not 400 task-specific solvers. A rule covering 5 tasks with one clean sentence is worth more than 5 single-task rules.
+- **Write a solver for every task whose rule can be verified.** Coverage of 1 training task is sufficient — a verified solver can still match evaluation tasks drawn from the same distribution. The old coverage ≥ 2 threshold is retired.
+- **Build composable primitives.** When implementing a solver, check whether the sub-operations (bounding box, flood fill, line extension, hollow interior, etc.) already exist in `src/loader.py` or a utility module. If a new primitive is needed and likely to recur, extract it to the shared library rather than duplicating code. This keeps new solvers short.
+- **Generalise before you specify.** Before committing to a rule that names a specific colour, count, or position, ask: *does this need to be specific?* Prefer a rule that refers to a role (e.g. "the anchor block", "the unique colour", "the largest region") over one that names a literal value (e.g. "colour 1", "3 blocks", "bottom row"). A role-based rule generalises better to the evaluation set.
 
-### Before writing a new solver module
+### Task triage cycle
 
-After deriving a rule from one task, run the detect function across all 400 training tasks *before* committing to a standalone module:
+For each task:
 
-```bash
-conda run -n arc-agi python -c "
-import sys, json
-sys.path.insert(0, '.')
-from src.loader import load_all_tasks
-# replace detect_X with your candidate function
-from your_module import detect_X
-tasks = load_all_tasks('data/training')
-hits = [t['task_id'] for t in tasks if detect_X(t)]
-print(len(hits), 'tasks match:', hits)
-"
-```
+1. **Decompose** — Apply the 7 decomposition lenses (see below) before hypothesising.
+2. **Verbal 4-step** — Apply the protocol in text. If no hypothesis emerges, stop and ask the user immediately.
+3. **Solver + verification** — Write `solve(inp)`, run against all training pairs.
+4. **Decision:**
+   - All pairs match → write module, register in `ALL_PRIMITIVES`, move on.
+   - Some pairs fail → make one revision attempt. If still failing, stop and ask the user immediately.
+   - No hypothesis after decomposition + 4-step → stop and ask the user immediately.
 
-- **Coverage ≥ 2–3 tasks**: the rule is general enough — write the module.
-- **Coverage = 1**: record the rule in `results/solver_backlog.md`, then search for structurally similar unsolved tasks before writing a dedicated module. A single-task solver is a last resort, not a first step.
+**Time limit: ~1 minute per task.** If the rule isn't clear within that window, bring the user in rather than stalling. The user is a faster pattern-recogniser for novel tasks and should not be kept waiting.
 
-When analysing a batch of tasks, look for tasks that share the same structural pattern and group them. Derive the rule to cover the whole group, not just the single example task that first revealed it.
+### Autonomous operation
+
+Proceed without asking for confirmation on all local work:
+- Running analysis code, reading task data, printing grids
+- Writing or editing solver modules, tests, and utility files
+- Updating `results/solver_backlog.md`, `CLAUDE.md`, or memory files
+- Any local file read, write, or edit
+
+**Always ask before:**
+- `git push` (to any remote branch)
+- Deleting files or branches
+- Any operation affecting shared or remote state
+
+Do not run long autonomous batches that leave the user uninformed for more than ~1 minute. Prefer short task-by-task cycles with the user present.
+
+## Decomposition pre-step
+
+Before running the 4-step protocol, apply these 7 lenses to decompose the input. They answer "what kind of problem is this?" and dramatically narrow the hypothesis space.
+
+1. **Fixed vs. moving** — Which cells are identical between input and output? The remainder is the change. (If one object stays and another shifts, the rule is probably a translation or alignment.)
+2. **How many parts?** — Can non-zero cells be split into 2+ distinct connected components? If yes, do they behave differently?
+3. **Nature of the change** — For the part(s) that change, is the change: translation / rotation (90°, 180°, 270°) / reflection / recolouring / deletion / completion / scaling? Check rotation explicitly — shapes that look like reflections are often 180° rotations, and near-symmetric shapes may have a rotational gap being filled.
+4. **What drives the change?** — Is it self-determined (the shape implies the transformation) or indicator-driven (a marker cell or colour specifies what to do)? Specifically: are there **isolated single-cell markers** whose colours match special cells in a nearby template? If yes, the markers are encoding position/direction/orientation for where the template should be placed or extended.
+5. **Spatial relationship after** — Do parts end up touching, adjacent, aligned to a grid, or symmetric?
+6. **More structure than input?** — If the output is more symmetric, complete, or regular, the rule is likely *repair* or *complete*. If the output contains additional copies of a shape already present in the input, the rule is likely *stamp* or *extend*. Check this before analysing the markers — once you see "copies added", the markers only need to answer direction and colour.
+7. **Less content than input?** — If the output has fewer cells, colours, or a smaller grid, the rule is likely *extract* or *filter*.
+
+Only after these 7 lenses: run the 4-step protocol below.
 
 ## ARC task analysis protocol
 
@@ -107,6 +119,12 @@ These patterns appear across dozens of tasks. Recognising the structure immediat
 **Extension by period.** If the output is longer than the input in one dimension and begins with the same content, find the repeating unit in the input sequence and continue it. The period is usually short (2–4 cells). Check rows, columns, and diagonals independently. Task 017c7c7b exemplifies this along a diagonal.
 
 **Extract the unique object.** When multiple objects/regions exist in the input and one is distinguished by a property not shared by any other (unique colour, unique size, unique shape, unique hole, only one touching the border), the output is that unique object, typically cropped to its bounding box or centred in the output. Apply step 2 ("What doesn't belong?") to find it — but note that "unique" here means structurally unique, not just visually prominent.
+
+**Template + isolated markers encoding orientation (STAMP_ROTATED).** If the input contains one or more connected multi-colour template shapes AND isolated single cells whose colours match the template's special (non-skeleton) colours, the output places each template in the D4 rotation/reflection that aligns its special cells with the corresponding marker positions. Everything else is cleared. Works even when there are two templates and two marker sets — match each template to the marker set whose colours it can align to under some D4 transform. Task 0e206a2e exemplifies this.
+
+**Near-rotationally-symmetric shape (ROTATION_COMPLETE).** If a single-colour shape is almost 180° rotationally symmetric but has extra cells on one side, the output adds colour 2 at the 180°-rotated positions of those extra cells. Find the rotation centre algebraically (midpoint of matched cell pairs). Task 1b60fb0c exemplifies this.
+
+**Template + directional marker arms (STAMP_WITH_ARMS).** If the input contains a template shape and small clusters of other colours positioned adjacent to it (one cluster per direction), the output stamps copies of the template in each marker's colour, extending in the direction the marker indicates, repeating with gap=1 until the grid edge. Each marker cluster is a partial copy of the template placed at the first copy's position — this is how the direction and colour are encoded. Task 045e512c exemplifies this.
 
 **Input encodes its own output size via a border legend.** If the input contains a marginal annotation — an L-shaped border, a full edge row/column, or a corner region — whose colours or segment counts vary across training pairs while the core content stays the same, that annotation is a scale key. Count the distinct colours (or segments) in the annotation to derive the expansion factor; the first two training pairs together establish the mapping. Task 469497ad exemplifies this: the right column and bottom row form an L-border whose distinct-colour count equals (scale − 1), and the output is the full input scaled by that factor with diagonal marker rays added.
 

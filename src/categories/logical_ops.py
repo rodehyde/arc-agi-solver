@@ -102,6 +102,28 @@ def detect_logical_op(task: dict) -> tuple[str, str, int] | None:
     return sorted(candidates)[0]
 
 
+def solve_logical_op(
+    input_grid: list[list[int]], task: dict
+) -> list[list[int]] | None:
+    """Apply the detected logical operation to input_grid."""
+    result = detect_logical_op(task)
+    if result is None:
+        return None
+    split_name, op_name, fill_colour = result
+    inp = np.array(input_grid, dtype=np.int32)
+    out_h = len(task["train"][0]["output"])
+    out_w = len(task["train"][0]["output"][0])
+    splits = _try_splits(inp, out_h, out_w)
+    split_map = {s[0]: (s[1], s[2]) for s in splits}
+    if split_name not in split_map:
+        return None
+    g1, g2 = split_map[split_name]
+    a, b = g1 != 0, g2 != 0
+    mask = _OPS[op_name](a, b)
+    out = np.where(mask, fill_colour, 0).astype(np.int32)
+    return out.tolist()
+
+
 def categorise_logical_op(task: dict) -> list[str]:
     """Return ['LOGICAL_OP'] if a consistent binary boolean operation is detected."""
     return LOGICAL_OP_CATEGORIES if detect_logical_op(task) is not None else []

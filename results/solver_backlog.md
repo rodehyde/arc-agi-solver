@@ -135,3 +135,304 @@ Tasks: `469497ad`, `007bbfb7`
 **Step 4:** Find the axis of overlap (column ranges overlap → move vertically; row ranges overlap → move horizontally). Move shape 2 until its bounding box is one step away from shape 8's bounding box.
 
 **Coverage note:** Rule as stated (colours 2 and 8 specifically) hits only 1 task. Likely generalises to any two distinct shapes where one slides toward the other — broaden the detect function before writing a module.
+
+---
+
+## `0a938d79` — REPEATING_STRIPES (coverage = 1, awaiting family)
+
+**Step 1:** Almost entirely empty grid with exactly 2 non-zero cells; the rest is background.  
+**Step 2:** Two isolated markers are conspicuously sparse — they define positions, not shapes.  
+**Step 3:** Wide grid (W ≥ H) → vertical column stripes; tall grid (H > W) → horizontal row stripes. Stripes alternate between the two marker colours, starting at each marker's coordinate along the stripe axis, repeating with period = gap between markers, extending to the end of the grid. Cells before the first marker remain zero.  
+**Step 4:** Find 2 marker cells. If wide → fill columns at c1, c1+gap, c1+2·gap,... alternating v1/v2 colours; if tall → same for rows.
+
+**Coverage note:** Strict 2-marker rule hits only 1 task. Likely generalises to N markers of alternating colours with a consistent period — broaden before writing a module.
+
+---
+
+## `0e206a2e` — TEMPLATE_STAMP_BY_COLOUR (MOVE_TO_STATIC variant, needs family search)
+
+**Step 1:** Sparse grid with multiple connected template shapes (cross-like structures of 8s with embedded coloured cells) alongside isolated scattered coloured cells.  
+**Step 2:** Isolated non-8 coloured cells away from templates are the anomaly — detached anchor markers.  
+**Step 3:** Each isolated cluster of non-8 colours (3, 1, 4) matches the non-8 colour signature of one template. The output removes all templates and stamps each template at its corresponding isolated anchor cluster, replacing the template 8s appropriately.  
+**Step 4:** Match isolated colour clusters to templates by non-8 colour set; stamp template at anchor position; clear original templates.
+
+**Coverage note:** Likely a MOVE_TO_STATIC sub-variant with multi-colour anchor matching. Needs family search before writing a module.
+
+---
+
+## `1caeab9d` — ALIGN_BLOCKS_TO_ANCHOR (coverage = 1, awaiting family)
+
+**Step 1:** Sparse grid with several small same-height rectangular blocks of distinct colours, each at a different row position, spread across different columns.  
+**Step 2:** The blocks are vertically misaligned — they should all share the same row band.  
+**Step 3:** Exactly one block (the anchor) never moves. Every other block slides vertically, columns unchanged, until its rows match the anchor's row band. The anchor is whichever block is already at the correct row in the output.  
+**Step 4:** Find the anchor block (the one whose row band is preserved); slide all other same-height blocks vertically to align with it; columns unchanged.
+
+**Coverage note:** Rule covers only 1 task. Likely generalises to any count of same-height blocks with one fixed anchor — broaden detect before writing a module.
+
+---
+
+## `22233c11` — DIAGONAL_EXTEND (too hard — needs simpler framing)
+
+**Step 1:** Sparse grid, colour-3 cells only; output keeps 3s and adds colour-8 cells.  
+**Step 2:** The 8 cells are always outside the bounding box of the 3s.  
+**Step 3:** Each group of 3s occupies one diagonal of its bounding box; 8s appear one further step outward from the two empty diagonal corners. For solid blocks, the group pair together occupies one diagonal of the combined bounding box and the same rule applies at group scale.  
+**Step 4:** Extend the anti-diagonal outward one unit beyond the empty corners.
+
+**Note:** The rule is correct but the multi-scale framing (individual vs combined bounding box) is brittle. Needs a simpler geometric restatement before coding. Parked until a cleaner formulation is found.
+
+---
+
+## `264363fd` — STAMP_WITH_EXTENDED_ARMS (MOVE_TO_STATIC variant, too complex)
+
+**Step 1:** Large grid with distinct filled rectangles each containing a single anomalous cell, plus a small cross-shaped template in the background outside the rectangles.  
+**Step 2:** Anomalous cells inside rectangles and the external template are the anomalies.  
+**Step 3:** The external template is a local cross pattern centred on the anomaly colour. For each anomaly cell inside a rectangle, the template is stamped there — but its orthogonal arms extend all the way to the rectangle boundaries. The original external template disappears from the output.  
+**Step 4:** Stamp template at each anomaly; extend orthogonal arms to rectangle bounds; clear original template.
+
+**Note:** Multi-step rule requiring rectangle detection + anomaly finding + template reading + extended-arm stamping. Needs MOVE_TO_STATIC family generalisation before implementing.
+
+---
+
+## `2bee17df` — CORRIDOR_PASSAGE (coverage = 1, awaiting family)
+
+**Step 1:** Grid has two distinct boundary colours with a corridor of 0-cells between them; some rows are fully open, others are constricted by infiltrating boundary cells.  
+**Step 2:** The constrictions are the anomaly — the corridor is not uniform width.  
+**Step 3:** Mark with colour 3: all 0-cells in fully-open rows (the wide band), and the column(s) that are 0 in every constricted row (the minimum passage).  
+**Step 4:** Fill the full-width band rows entirely with 3; fill the passage column(s) — those free in every constricted row — with 3 throughout.
+
+**Coverage note:** Rule covers only 1 task. Likely generalises beyond specific boundary colours 8 and 2 (already role-based), but needs a family search before writing a module.
+
+---
+
+## `3345333e` — COMPLETE_COVERED_SYMMETRY (coverage = 1, awaiting family)
+
+**Step 1:** Grid has a shape (one colour) and a solid rectangular block (second colour) that together would form a symmetric whole.  
+**Step 2:** The solid block sits exactly where the shape's reflection should be — it's covering the missing half.  
+**Step 3:** Remove the block; fill those cells with the reflection of the visible shape across the symmetry axis (vertical or horizontal) defined by the output shape.  
+**Step 4:** Detect: exactly 2 non-zero input colours, one disappears in output; output shape is symmetric; output = input shape ∪ its reflection, cover cells → 0.
+
+**Coverage note:** Rule covers only 1 task. Likely a common pattern — the detector may be too strict (e.g. requiring exactly 2 colours). Consider relaxing to allow background ≠ 0 or multiple cover shapes.
+
+---
+
+## `9ecd008a` — RESTORE_POINT_SYMMETRY (coverage = 1, awaiting family)
+
+**Step 1:** Large grid (16×16) is almost entirely filled with non-zero values; a small rectangular block of 0s sits somewhere in it.  
+**Step 2:** The 0-block is the anomaly — the grid is otherwise regular.  
+**Step 3:** Excluding the 0-block, the grid has exact 180° point symmetry about its centre. The output is the values that fill the 0-block to restore that symmetry — i.e., the values at the point-symmetric counterpart positions, read in the same top-left→bottom-right order.  
+**Step 4:** Find the rectangular 0-block; verify 180° point symmetry elsewhere; output the values at (H−1−r, W−1−c) for each (r,c) in the 0-block.
+
+**Coverage note:** Rule covers only 1 task. Likely generalises: any grid with near-perfect 180° symmetry and a rectangular hole should match. May belong to a broader RESTORE_REGULARITY family (see f9012d9b below).
+
+---
+
+## `f9012d9b` — RESTORE_PERIODIC_TILING (coverage = 1, awaiting family)
+
+**Step 1:** Grid has a tiled/repeating pattern with a rectangular block of 0s in one corner or region.  
+**Step 2:** The 0-block breaks the tiling — the rest of the grid is a coherent periodic pattern.  
+**Step 3:** The non-zero cells have a consistent period in each column (and row). The output is the values that continue that period into the 0-block.  
+**Step 4:** For each column intersecting the 0-block, determine the column's period from the non-zero cells; fill each 0 with the value at (row mod period).
+
+**Coverage note:** Rule covers only 1 task. Likely generalises to any periodic tiling with a rectangular hole. Sibling of 9ecd008a — both are RESTORE_REGULARITY sub-variants: output fills a 0-hole to complete the grid's underlying regularity (point symmetry vs. periodic tiling).
+
+---
+
+## `63613498` — SEPARATOR_GRID_SHAPE_MATCH (coverage = 1, awaiting family)
+
+**Step 1:** Input has a separator grid (single-colour lines dividing the grid into cells). One cell contains a coloured shape; the other cells contain single marker cells of various colours.  
+**Step 2:** The other cells are conspicuously near-empty — each holds only one indicator cell. The shape-cell is the "answer" and the indicators are the "question."  
+**Step 3:** The output shows a single cell's worth of content: the shape from the shape-cell, recoloured to match one of the indicator colours. The indicator cell selected is the one that was closest to, or structurally aligned with, the shape cell (e.g. same row or column in the separator grid).  
+**Step 4:** Find the dense cell (contains a multi-cell shape); find the indicator cell that selects it (same row or column in the separator grid); output = shape recoloured to that indicator's colour, cropped to cell size.
+
+**Note:** This task is in the COLOUR_PERMUTATION group (task IDs: `5582e5ca`, `63613498`, `85c4e7cd`, `9565186b`, `aabf363d`, `bda2d7a6`, `f76d97a5`) but its rule is structurally different from the per-cell colour remapping strategies in colour_remap.py. It involves separator grid parsing and shape extraction.
+
+**Coverage note:** Rule covers only 1 task. Should be checked against the broader SEPARATOR_GRID family (31 tasks detected).
+
+---
+
+## `321b1fc6` — STAMP_TEMPLATE_AT_TARGETS (MOVE_TO_STATIC variant, coverage = 1)
+
+**Step 1:** Small 2×2 multi-colour template sits in the top-left region; several 2×2 solid colour-8 blocks are scattered elsewhere.  
+**Step 2:** The 8-blocks are conspicuously uniform — they are placeholders, not shapes.  
+**Step 3:** Each 2×2 colour-8 block is replaced by the template, aligned to that block's top-left corner. The original template position becomes 0.  
+**Step 4:** Locate the 2×2 template (non-8, top-left-most multi-colour block); for every 2×2 colour-8 block, stamp the template there; zero the original template cells.
+
+**Coverage note:** Rule covers only 1 task as stated (fixed 2×2 template at 2×2 8-targets). Belongs to MOVE_TO_STATIC family — generalise to arbitrary template shape and arbitrary target colour.
+
+---
+
+## `3618c87e` — GRAVITY (coverage = 1)
+
+**Step 1:** Input has a shaped region of one colour (colour 5) with scattered cells of another colour (colour 1) embedded in it.  
+**Step 2:** The colour-1 cells are out of place — they float inside the 5-region.  
+**Step 3:** Each colour-1 cell falls downward through the 5-region until it reaches the bottom-most row of the 5-region in its column. The 5 cells above move up to fill the vacated positions.  
+**Step 4:** For each column of the 5-region, move all colour-1 cells to the bottom of the column's 5-cells (swapping 1s downward past 5s).
+
+**Coverage note:** Rule covers only 1 task. May generalise to any direction (left/right/up) or any anchor colour.
+
+---
+
+## `3631a71a` — RESTORE_MASKED_REGULARITY (coverage = 1, see also 9ecd008a, f9012d9b)
+
+**Step 1:** Large 30×30 grid is almost entirely filled with non-zero values, with scattered rectangular blobs of colour 9 throughout.  
+**Step 2:** The colour-9 blobs are the anomaly — they break what should be a regular pattern.  
+**Step 3:** Removing the 9s, the remaining cells have near-perfect 180° rotational symmetry. The output replaces every 9 with the value at the point-symmetric position (row H−1−r, col W−1−c) relative to the grid centre.  
+**Step 4:** For each colour-9 cell at (r,c), replace it with inp[H−1−r, W−1−c] (the 180°-symmetric counterpart). Non-9 cells are unchanged.
+
+**Coverage note:** Rule covers only 1 task. Belongs to RESTORE_REGULARITY family (see `9ecd008a`, `f9012d9b`). Difference: the mask colour (9) is scattered, not a contiguous block.
+
+---
+
+## `3bdb4ada` — COMB_MIDDLE_ROW (coverage = 1)
+
+**Step 1:** Input contains multiple 3-row-tall solid filled rectangles of various colours.  
+**Step 2:** The middle row of each rectangle is filled in, but it looks over-dense compared to top/bottom.  
+**Step 3:** The middle row of every 3-row rectangle becomes a "comb": colour cells remain at even column indices (relative to rectangle start), zero at odd indices. Top and bottom rows unchanged.  
+**Step 4:** For each 3-row solid rectangle, zero every other cell in the middle row starting from column offset 1 (keep col 0, erase col 1, keep col 2, …).
+
+**Coverage note:** Rule covers only 1 task. The alternating pattern may be derivable from a more general rule (e.g. period-2 stripe over middle row).
+
+---
+
+## `42a50994` — ERASE_ISOLATED (coverage = 1)
+
+**Step 1:** Sparse same-colour dots scattered across a large grid; some are adjacent (diagonal counts) and some are truly alone.  
+**Step 2:** Isolated single-cell dots are the anomaly — they have no 8-connected neighbours.  
+**Step 3:** Output retains exactly the cells that belong to connected components of size ≥ 2 (using 8-connectivity including diagonals); isolated single-cell components are erased.  
+**Step 4:** Compute 8-connected components; erase all size-1 components; preserve all size ≥ 2 components unchanged.
+
+**Coverage note:** Rule covers only 1 task. Likely generalises — search for any task where output exactly matches input with size-1 8-connected components removed.
+
+---
+
+## `4347f46a` — HOLLOW_RECTANGLE (coverage = 1)
+
+**Step 1:** Input contains multiple solid filled rectangles of distinct colours on a black background.  
+**Step 2:** The interiors of the rectangles are over-filled — they look solid when they should be hollow.  
+**Step 3:** Each solid rectangle becomes a border-only frame: all interior cells (not on the bounding-box edge) become 0. Border cells retain their original colour.  
+**Step 4:** For each solid-colour connected component whose bounding box is completely filled (a rectangle), zero all cells strictly interior to the bounding box.
+
+**Coverage note:** Rule covers only 1 task. Likely to generalise — search for tasks where output = input with interior of each rectangle zeroed.
+
+---
+
+## `6e02f1e3` — DIAGONAL_SELECTOR (coverage = 1)
+
+**Step 1:** 3×3 input (multiple pairs); each grid contains 2–3 colours filling all cells; output is a 3×3 grid with colour 5 on one diagonal and 0 elsewhere.  
+**Step 2:** The "selected" diagonal (main vs. anti) varies between pairs.  
+**Step 3:** One diagonal's cells form a consistent colour-sequence edge (separating the two dominant colour regions); colour 5 marks that diagonal; everything else becomes 0. The selected diagonal is the boundary between the dominant-colour upper-left triangle and the dominant-colour lower-right triangle.  
+**Step 4:** Determine which diagonal is the colour-boundary (cells of dominant colour A lie on one side, dominant colour B on the other); mark those 3 diagonal cells with colour 5, zero all others.
+
+**Coverage note:** Rule covers only 1 task. Complex selection rule — confidence MEDIUM until verified.
+
+---
+
+## `7e0986d6` — REPAIR_CONTAMINATED_RECTANGLES (coverage = 1)
+
+**Step 1:** Grid contains several solid rectangles of colour 3 with occasional contaminating colour-8 cells inside them, plus isolated colour-8 cells outside any rectangle.  
+**Step 2:** The colour-8 cells are anomalies — they either contaminate rectangles or float alone.  
+**Step 3:** For each colour-8 cell inside a 3-rectangle, replace it with colour 3 (repair the rectangle). Isolated colour-8 cells outside any rectangle become 0.  
+**Step 4:** Identify all colour-3 bounding boxes; replace every colour-8 cell within a bounding box with colour 3; erase all remaining colour-8 cells.
+
+**Coverage note:** Rule covers only 1 task as stated (colours 3 and 8 specifically). The role-based generalisation: "repair contaminated solid rectangles by replacing the minority anomaly colour with the rectangle colour" — search for that pattern.
+
+---
+
+## `7f4411dc` — KEEP_SOLID_RECTANGLES (coverage = 1)
+
+**Step 1:** Input contains a few solid rectangular blocks of one colour plus scattered individual cells and protrusions of the same colour.  
+**Step 2:** The scattered individual cells and protrusions are the anomaly — they break the clean block structure.  
+**Step 3:** Output retains exactly the cells that are part of an axis-aligned solid rectangle of area ≥ 4 (height ≥ 2, width ≥ 2); all other cells (isolated, single-row/column protrusions) become 0.  
+**Step 4:** Enumerate all solid colour-homogeneous sub-rectangles of area ≥ 4; mark their cells; output = input where marked, 0 elsewhere.
+
+**Coverage note:** Rule covers only 1 task. May generalise — search for tasks where keeping only cells in ≥ 2×2 solid rectangles produces the output.
+
+---
+
+## `855e0971` — BAND_LINE_EXTEND (coverage = 1)
+
+**Step 1:** Grid is divided into 2–3 solid-colour rectangular bands (horizontal or vertical); each band contains exactly one or two isolated 0 cells embedded within it.  
+**Step 2:** The embedded 0 cells are the anomaly — they are seeds that define a cut.  
+**Step 3:** Each embedded 0 extends into a full line across its band: perpendicular to the band's long axis (0 in a horizontal band → extends to a full column; 0 in a vertical band → extends to a full row).  
+**Step 4:** For each band, find all embedded 0-seed cells; extend each 0 into a complete line crossing the entire band in the short-axis direction.
+
+**Coverage note:** Rule covers only 1 task. Likely to generalise to any grid with uniform colour bands and isolated 0-seeds.
+
+---
+
+## `91714a58` — EXTRACT_SOLID_BLOCK (coverage = 1)
+
+**Step 1:** Large grid densely filled with scattered individual-coloured cells (noise), with exactly one embedded solid filled rectangle.  
+**Step 2:** The solid rectangle is the only non-noise element — everything else is single isolated cells.  
+**Step 3:** Output = the solid rectangle only; all noise cells (individual scattered cells not part of any solid block) are zeroed.  
+**Step 4:** Find the unique connected component whose bounding box is completely filled (solid rectangle); retain it; zero everything else.
+
+**Coverage note:** Rule covers only 1 task. Related to `7f4411dc` (KEEP_SOLID_RECTANGLES) — same idea but with a single dominant rectangle rather than multiple clean ones.
+
+---
+
+## `a61f2674` — COLUMN_RANK (coverage = 1)
+
+**Step 1:** Input contains 4–5 vertical columns of same colour (colour 5) at different column positions, each of different height (counted from the bottom row).  
+**Step 2:** The columns vary in height — the height difference is the key signal.  
+**Step 3:** The tallest column is recoloured to 1; the shortest column is recoloured to 2; all other columns are erased (become 0).  
+**Step 4:** Identify all same-colour vertical column segments; rank by height; recolour tallest → 1, shortest → 2; erase all middle-ranked columns.
+
+**Coverage note:** Rule covers only 1 task. Likely a specific instance of a more general RANK/SELECT pattern.
+
+---
+
+## `d23f8c26` — KEEP_CENTER_COLUMN (coverage = 1)
+
+**Step 1:** Input is a square (or rectangular) grid with values scattered throughout; the output has only one column non-zero.  
+**Step 2:** All columns except the centre column are erased — that's the anomaly.  
+**Step 3:** The output preserves exactly the values in the centre column (floor(W/2)) and zeroes everything else.  
+**Step 4:** Compute centre column index = W//2; copy centre column to output; zero all other cells.
+
+**Coverage note:** Rule covers only 1 task. Confidence MEDIUM — need to verify pair 3 and check if the rule is "centre column" or some other column selection criterion.
+
+---
+
+## `d89b689b` — QUADRANT_FILL_FROM_MARKERS (coverage = 1)
+
+**Step 1:** Input contains a small solid 2×2 block (the frame) and 4 isolated single-coloured cells scattered in the four quadrants around it.  
+**Step 2:** The 2×2 block's cells are all the same colour — they are placeholders for colours to be filled.  
+**Step 3:** Each quadrant provides one marker cell; the corner of the 2×2 block facing that quadrant is filled with the marker's colour. The marker cells themselves are erased.  
+**Step 4:** Find 2×2 solid block (the frame); find the 4 isolated marker cells (one in each quadrant relative to the block's centre); fill frame corners: top-left←TL marker, top-right←TR, bottom-left←BL, bottom-right←BR; erase all non-frame cells.
+
+**Coverage note:** Rule covers only 1 task. Likely a specific instance of a broader FILL_FROM_CONTEXT family.
+
+---
+
+## `d90796e8` — ADJACENT_PAIR_MERGE (coverage = 1, confidence MEDIUM)
+
+**Step 1:** Sparse grid with cells of 3 colours: one "survivor" (colour 5), and two "pair" colours (3 and 2) that appear near each other.  
+**Step 2:** Some 3-2 adjacent pairs are visible; isolated 3s and isolated 2s also exist.  
+**Step 3:** Wherever a colour-3 cell is 4-adjacent to a colour-2 cell, the pair is merged: the 3 becomes colour 8, the 2 is erased. Isolated 3s and 2s (not touching the other) survive unchanged.  
+**Step 4:** For each (colour-3, colour-2) adjacent pair, replace the 3 with 8 and zero the 2. Leave non-paired cells untouched.
+
+**Coverage note:** Rule covers only 1 task. The specific colours (3, 2 → 8) may be fixed or task-specific. Confidence MEDIUM — the rule is plausible but the output colour 8 has no clear derivation from inputs 3 and 2.
+
+---
+
+## `ea786f4a` — DIAGONAL_ERASE_FROM_CENTER (coverage = 1)
+
+**Step 1:** Input is a solid colour-filled region with a single 0 cell at or near the centre.  
+**Step 2:** The 0 cell is the seed; cells at diagonal positions from it look over-dense.  
+**Step 3:** Every cell whose row-distance from the 0 equals its column-distance (i.e. |dr| = |dc|, both diagonals through the 0) becomes 0. All other cells retain their colour.  
+**Step 4:** Find the 0 cell at (cr, cc); for every non-zero cell at (r, c) where |r−cr| = |c−cc|, set it to 0; preserve all other cells.
+
+**Coverage note:** Rule covers only 1 task. Also listed in SEPARATOR_GRID_SAME_SIZE_FILL family — that may be a misclassification; the separator grid (if any) is not the key structure here.
+
+---
+
+## `09629e4f` — SEPARATOR_GRID_POSITIONAL_MAP (coverage = 1)
+
+**Step 1:** 11×11 grid divided by colour-5 separator lines into a 3×3 array of 3×3 sub-cells. Each sub-cell either contains colour-8 (cyan) cells or content cells of other colours, but never both — except one sub-cell which has no colour-8 cells at all.  
+**Step 2:** The one sub-cell without any colour-8 is anomalous — it is structurally different from all others.  
+**Step 3:** That no-8 sub-cell is a positional map: each content colour appearing at position (r,c) within the 3×3 sub-cell means the output's sub-cell at position (r,c) in the 3×3 grid should be filled entirely with that colour. All other output sub-cells are blank (0). The separator lines are preserved.  
+**Step 4:** Find the one 3×3 sub-cell containing no colour-8 pixels. For each (r,c) within that 3×3 that contains a non-zero, non-5 colour v, fill output sub-cell (r,c) solidly with colour v. All other sub-cells → 0.
+
+**Verified manually against all 4 training pairs.**
+
+**Coverage note:** Rule covers only 1 task as stated. Likely a variant of SEPARATOR_GRID_SAME_SIZE_FILL family — the no-8 sub-cell acts as a template/legend for the output layout.

@@ -99,6 +99,17 @@ def detect_transform(task: dict) -> tuple[str, object] | None:
 # Category interface (mirrors size_features / content_features pattern)
 # ---------------------------------------------------------------------------
 
+def solve_geometric_transform(
+    input_grid: list[list[int]], task: dict
+) -> list[list[int]] | None:
+    """Apply the detected geometric transform to input_grid."""
+    result = detect_transform(task)
+    if result is None:
+        return None
+    _, fn = result
+    return fn(np.array(input_grid, dtype=np.int32)).tolist()
+
+
 def categorise_geometric(task: dict) -> list[str]:
     """Return ['GEOMETRIC_TRANSFORM'] if a whole-grid transform is detected."""
     return GEOMETRIC_CATEGORIES if detect_transform(task) is not None else []

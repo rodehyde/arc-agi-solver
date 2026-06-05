@@ -175,6 +175,26 @@ def detect_tile_fill(task: dict) -> bool:
     return True
 
 
+def solve_tile_fill(input_grid: list[list[int]]) -> list[list[int]] | None:
+    """Apply the tile-fill rule to a single input grid.
+
+    Infers the repeating period from non-zero cells, reconstructs the tile,
+    and fills every zero cell with the corresponding tile value.
+    Returns None if the period cannot be determined.
+    """
+    inp = np.array(input_grid, dtype=np.int32)
+    H, W = inp.shape
+    period = find_period_from_nonzero(inp)
+    if period is None:
+        return None
+    ph, pw = period
+    tile = reconstruct_tile(inp, ph, pw)
+    rh = (H + ph - 1) // ph
+    rw = (W + pw - 1) // pw
+    out = np.tile(tile, (rh, rw))[:H, :W]
+    return out.tolist()
+
+
 def categorise_tile_fill(task: dict) -> list[str]:
     """Return ['TILE_FILL'] if the task is a tile-fill pattern."""
     return TILE_FILL_CATEGORIES if detect_tile_fill(task) else []

@@ -28,6 +28,11 @@ from .quadrant_reflect import categorise_quadrant_reflect, QUADRANT_REFLECT_CATE
 from .self_tile import categorise_self_tile, SELF_TILE_CATEGORIES
 from .line_fill_by_colour import categorise_line_fill_by_colour, LINE_FILL_BY_COLOUR_CATEGORIES
 from .row_fill_meet_middle import categorise_row_fill_meet_middle, ROW_FILL_MEET_MIDDLE_CATEGORIES
+from .connect_aligned_pairs import (
+    categorise_connect_aligned_pairs, CONNECT_ALIGNED_PAIRS_CATEGORIES,
+)
+from .quadrant_mirror import categorise_quadrant_mirror, QUADRANT_MIRROR_CATEGORIES
+from .colour_remap import categorise_colour_remap, COLOUR_REMAP_CATEGORIES
 
 CATEGORIES = (
     SIZE_CATEGORIES + CONTENT_CATEGORIES + GEOMETRIC_CATEGORIES
@@ -40,6 +45,9 @@ CATEGORIES = (
     + BORDER_ENCODED_SCALE_CATEGORIES + QUADRANT_REFLECT_CATEGORIES
     + SELF_TILE_CATEGORIES + LINE_FILL_BY_COLOUR_CATEGORIES
     + ROW_FILL_MEET_MIDDLE_CATEGORIES
+    + CONNECT_ALIGNED_PAIRS_CATEGORIES
+    + QUADRANT_MIRROR_CATEGORIES
+    + COLOUR_REMAP_CATEGORIES
 )
 
 
@@ -68,6 +76,9 @@ def categorise_task(task: dict) -> list[str]:
         + categorise_self_tile(task)
         + categorise_line_fill_by_colour(task)
         + categorise_row_fill_meet_middle(task)
+        + categorise_connect_aligned_pairs(task)
+        + categorise_quadrant_mirror(task)
+        + categorise_colour_remap(task)
     )
 
 

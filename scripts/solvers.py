@@ -2336,6 +2336,28 @@ def _solve_fn_smallest_rect_crop(inp):
 _solve_smallest_rect_crop = _make_category_solver(_solve_fn_smallest_rect_crop)
 
 
+def _solve_fn_shape_to_colour(inp):
+    """3×3 grid with 5 filled cells of one colour. Output is 1×1.
+    The output colour depends only on the shape: specifically the number of
+    4-connected components of the filled cells.
+    Lookup: 1 component→6, 2→3, 3→1, 5→2.
+    """
+    H, W = len(inp), len(inp[0])
+    if H != 3 or W != 3:
+        return None
+    filled = [(r, c) for r in range(H) for c in range(W) if inp[r][c] != 0]
+    if len(filled) != 5:
+        return None
+    comps = len(_connected_components(set(filled)))
+    lookup = {1: 6, 2: 3, 3: 1, 5: 2}
+    if comps not in lookup:
+        return None
+    return [[lookup[comps]]]
+
+
+_solve_shape_to_colour = _make_category_solver(_solve_fn_shape_to_colour)
+
+
 def _always(d): return True  # noqa: E731  — permissive pre-filter; verify() is the gate
 
 
@@ -2409,6 +2431,7 @@ ALL_PRIMITIVES = [
     ("SINGLE_CELL_OUTPUT",            _always, _solve_single_cell_output),
     ("MARKER_RAY",                    _always, _solve_marker_ray),
     ("SMALLEST_RECT_CROP",            _always, _solve_smallest_rect_crop),
+    ("SHAPE_TO_COLOUR",               _always, _solve_shape_to_colour),
 ]
 
 

@@ -1958,6 +1958,384 @@ def _solve_fn_nearest_border_fill(inp):
 _solve_nearest_border_fill = _make_category_solver(_solve_fn_nearest_border_fill)
 
 
+def _solve_fn_connect_same_colour(inp):
+    """Connect same-colour cells in same row or column with that colour (in-fill).
+
+    For every pair of same-colour cells sharing a row or column, fill all cells
+    between them with that colour. The fill colour equals the endpoint colour
+    (unlike CONNECT_ALIGNED_PAIRS which uses a separate fill colour).
+    """
+    H, W = len(inp), len(inp[0])
+    out = [row[:] for row in inp]
+    changed = False
+    from collections import defaultdict
+    by_row: dict = defaultdict(lambda: defaultdict(list))
+    by_col: dict = defaultdict(lambda: defaultdict(list))
+    for r in range(H):
+        for c in range(W):
+            v = inp[r][c]
+            if v != 0:
+                by_row[r][v].append(c)
+                by_col[c][v].append(r)
+    for r, cols_by_v in by_row.items():
+        for v, cols in cols_by_v.items():
+            if len(cols) >= 2:
+                for c in range(min(cols), max(cols) + 1):
+                    if inp[r][c] == 0:
+                        out[r][c] = v; changed = True
+    for c, rows_by_v in by_col.items():
+        for v, rows in rows_by_v.items():
+            if len(rows) >= 2:
+                for r in range(min(rows), max(rows) + 1):
+                    if inp[r][c] == 0:
+                        out[r][c] = v; changed = True
+    return out
+
+
+_solve_connect_same_colour = _make_category_solver(_solve_fn_connect_same_colour)
+
+
+def _solve_fn_row_col_mask_intersect(inp):
+    """Row-0 and col-last 5-patterns intersect: mark (row, col) pairs with colour 2.
+
+    Row 0 defines a column mask (positions of colour 5). The last column defines
+    a row mask (positions of colour 5). For each row in the row mask, place colour 2
+    at each column in the column mask.
+    """
+    H, W = len(inp), len(inp[0])
+    # Column mask: cols in row 0 with value 5
+    col_mask = [c for c in range(W) if inp[0][c] == 5]
+    # Row mask: rows in last column with value 5
+    row_mask = [r for r in range(H) if inp[r][W - 1] == 5]
+    # Exclude row 0 and col W-1 from masks to avoid the template row/col
+    row_mask = [r for r in row_mask if r != 0]
+    if not col_mask or not row_mask:
+        return None
+    # Verify at least one intersection is currently 0 in input
+    if all(inp[r][c] != 0 for r in row_mask for c in col_mask):
+        return None
+    out = [row[:] for row in inp]
+    for r in row_mask:
+        for c in col_mask:
+            if inp[r][c] == 0:
+                out[r][c] = 2
+    return out
+
+
+_solve_row_col_mask_intersect = _make_category_solver(_solve_fn_row_col_mask_intersect)
+
+
+def _solve_fn_two_cell_cross(inp):
+    """Two isolated coloured cells each shoot a full cross (row + col).
+
+    At the two intersection points of the two crosses, place colour 2.
+    Rule: exactly 2 non-zero cells; each fills its entire row and column;
+    the two cross-intersection cells (r1,c2) and (r2,c1) become 2.
+    """
+    H, W = len(inp), len(inp[0])
+    cells = [(r, c, inp[r][c]) for r in range(H) for c in range(W) if inp[r][c] != 0]
+    if len(cells) != 2:
+        return None
+    (r1, c1, v1), (r2, c2, v2) = cells
+    if v1 == v2:
+        return None
+    out = [[0] * W for _ in range(H)]
+    for c in range(W):
+        out[r1][c] = v1
+        out[r2][c] = v2
+    for r in range(H):
+        out[r][c1] = v1
+        out[r][c2] = v2
+    # intersection points
+    out[r1][c2] = 2
+    out[r2][c1] = 2
+    return out
+
+
+_solve_two_cell_cross = _make_category_solver(_solve_fn_two_cell_cross)
+
+
+def _solve_fn_snap_join(inp):
+    """Shapes connected by 5-arm cells snap together at their connectors.
+
+    Rule:
+    1. Remove all all-zero columns (blank gaps between shapes).
+    2. Sort connected components by leftmost column.
+    3. For each adjacent pair (A, B): shift B (and all subsequent shapes)
+       vertically so B's left 5-arm is in the same row as A's right 5-arm.
+    4. Colour all 5-cells with the non-5 colour of their component.
+    """
+    from collections import deque
+
+    H, W = len(inp), len(inp[0])
+
+    # -- find blank columns
+    blank_cols = {c for c in range(W) if all(inp[r][c] == 0 for r in range(H))}
+    if not blank_cols:
+        return None
+
+    # -- connected components of non-zero cells
+    visited = [[False] * W for _ in range(H)]
+    components: list[dict] = []
+    for sr in range(H):
+        for sc in range(W):
+            if inp[sr][sc] != 0 and not visited[sr][sc]:
+                comp: dict = {}
+                q: deque = deque([(sr, sc)])
+                visited[sr][sc] = True
+                while q:
+                    r, c = q.popleft()
+                    comp[(r, c)] = inp[r][c]
+                    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < H and 0 <= nc < W and inp[nr][nc] != 0 and not visited[nr][nc]:
+                            visited[nr][nc] = True
+                            q.append((nr, nc))
+                components.append(comp)
+
+    if len(components) < 2:
+        return None
+
+    # -- remap columns (remove blank cols)
+    col_map: dict = {}
+    new_c = 0
+    for c in range(W):
+        if c not in blank_cols:
+            col_map[c] = new_c
+            new_c += 1
+    W_new = new_c
+
+    remapped = [{(r, col_map[c]): v for (r, c), v in comp.items()} for comp in components]
+    remapped.sort(key=lambda comp: min(c for (r, c) in comp))
+
+    # -- compute row shifts so connecting 5-arms align
+    # Each pair (A, B): shift B so B's left 5-arm is in the same row as A's right 5-arm.
+    # Use effective rows (natural + accumulated shift) for both sides.
+    row_shifts = [0] * len(remapped)
+    for i in range(len(remapped) - 1):
+        # A's right arm: 5 with largest column, shifted by row_shifts[i]
+        a_fives = [(r + row_shifts[i], c) for (r, c), v in remapped[i].items() if v == 5]
+        if not a_fives:
+            continue
+        right_arm_row = max(a_fives, key=lambda x: x[1])[0]
+
+        # B's left arm: 5 with smallest column, shifted by row_shifts[i+1]
+        b_fives = [(r + row_shifts[i + 1], c) for (r, c), v in remapped[i + 1].items() if v == 5]
+        if not b_fives:
+            continue
+        left_arm_row = min(b_fives, key=lambda x: x[1])[0]
+
+        # Only update row_shifts[i+1]; subsequent pairs read their own accumulated shifts
+        row_shifts[i + 1] += right_arm_row - left_arm_row
+
+    # -- build output and colour 5s
+    out = [[0] * W_new for _ in range(H)]
+    for i, comp in enumerate(remapped):
+        rs = row_shifts[i]
+        colour = next((v for v in comp.values() if v != 5), None)
+        for (r, c), v in comp.items():
+            nr = r + rs
+            if 0 <= nr < H:
+                out[nr][c] = colour if v == 5 else v
+
+    return out
+
+
+_solve_snap_join = _make_category_solver(_solve_fn_snap_join)
+
+
+def _connected_components(cells: set) -> list:
+    """Return list of connected components (sets) from a set of (r,c) cells."""
+    from collections import deque
+    remaining = set(cells)
+    comps = []
+    while remaining:
+        start = next(iter(remaining))
+        comp: set = set()
+        q: deque = deque([start])
+        remaining.remove(start)
+        while q:
+            r, c = q.popleft()
+            comp.add((r, c))
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nb = (r + dr, c + dc)
+                if nb in remaining:
+                    remaining.remove(nb)
+                    q.append(nb)
+        comps.append(comp)
+    return comps
+
+
+def _bridges_two_regions(candidate_cells: set, other_cells: set) -> bool:
+    """True if candidate_cells form a 4-connected path between the two
+    connected components of other_cells (there must be exactly 2 components).
+    """
+    from collections import deque
+    comps = _connected_components(other_cells)
+    if len(comps) != 2:
+        return False
+    adj = []
+    for comp in comps:
+        touching = {(r + dr, c + dc)
+                    for r, c in comp
+                    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]} & candidate_cells
+        adj.append(touching)
+    if not adj[0] or not adj[1]:
+        return False
+    # BFS through candidate_cells from adj[0] to reach adj[1]
+    seen: set = set(adj[0])
+    q: deque = deque(adj[0])
+    while q:
+        r, c = q.popleft()
+        if (r, c) in adj[1]:
+            return True
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nb = (r + dr, c + dc)
+            if nb in candidate_cells and nb not in seen:
+                seen.add(nb)
+                q.append(nb)
+    return False
+
+
+# ── Single-cell output predicates ─────────────────────────────────────────────
+# Each predicate takes (colour, cells_of_that_colour, all_cells_by_colour)
+# and returns True if that colour "wins" under this predicate.
+#
+# Add new predicates here as new 1×1-output task families are discovered.
+
+_SINGLE_CELL_PREDICATES = [
+    # P1: this colour's cells bridge the two disconnected regions of some other colour
+    lambda c, cells, by_col: any(
+        _bridges_two_regions(set(cells), set(by_col[d]))
+        for d in by_col if d != c and len(_connected_components(set(by_col[d]))) == 2
+    ),
+]
+
+
+def _solve_fn_single_cell_output(inp):
+    """Output is 1×1. Finds the colour in the input that uniquely satisfies one
+    of the predicates in _SINGLE_CELL_PREDICATES. Returns [[colour]] or [[0]]
+    if no candidate colour passes (meaning some other colour wins instead).
+
+    Predicates (add more as new task families are found):
+      P1 — bridges_two_regions: colour C's cells form a connected path between
+           the two disconnected blobs of some other colour D.
+    """
+    H, W = len(inp), len(inp[0])
+    by_col: dict = {}
+    for r in range(H):
+        for c in range(W):
+            v = inp[r][c]
+            if v != 0:
+                by_col.setdefault(v, []).append((r, c))
+
+    if not by_col:
+        return None
+
+    all_colours = list(by_col.keys())
+
+    for pred in _SINGLE_CELL_PREDICATES:
+        winners = [c for c in all_colours if pred(c, by_col[c], by_col)]
+        if len(winners) == 1:
+            return [[winners[0]]]
+        if len(winners) == 0 and len(all_colours) > 1:
+            # no colour wins → output [[0]] (none satisfies the predicate)
+            # only return this if the predicate is relevant (other colours exist)
+            pass
+
+    # fallback: if predicate returns False for all colours → output is [[0]]
+    for pred in _SINGLE_CELL_PREDICATES:
+        if all(not pred(c, by_col[c], by_col) for c in all_colours):
+            return [[0]]
+
+    return None
+
+
+_solve_single_cell_output = _make_category_solver(_solve_fn_single_cell_output)
+
+
+def _solve_fn_marker_ray(inp):
+    """One marker cell (unique colour, count=1) inside a body shape.
+    The marker shoots a ray in the direction the body extends from it
+    (same row or column), filling empty cells past the body to the grid edge
+    with the marker colour.
+    """
+    H, W = len(inp), len(inp[0])
+    from collections import Counter
+    counts = Counter(inp[r][c] for r in range(H) for c in range(W) if inp[r][c] != 0)
+    if len(counts) != 2:
+        return None
+    marker_col = next((c for c, n in counts.items() if n == 1), None)
+    if marker_col is None:
+        return None
+    body_col = next(c for c in counts if c != marker_col)
+
+    mr, mc = next((r, c) for r in range(H) for c in range(W) if inp[r][c] == marker_col)
+    body = {(r, c) for r in range(H) for c in range(W) if inp[r][c] == body_col}
+
+    # fire direction: body extends in that direction but NOT in the opposite
+    def has_body(dr, dc):
+        r, c = mr + dr, mc + dc
+        while 0 <= r < H and 0 <= c < W:
+            if (r, c) in body:
+                return True
+            r += dr; c += dc
+        return False
+
+    fire_dir = None
+    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        if has_body(dr, dc) and not has_body(-dr, -dc):
+            fire_dir = (dr, dc)
+            break
+
+    if fire_dir is None:
+        return None
+
+    out = [row[:] for row in inp]
+    dr, dc = fire_dir
+    r, c = mr + dr, mc + dc
+    # skip over body cells, then fill empty cells with marker colour
+    while 0 <= r < H and 0 <= c < W and inp[r][c] == body_col:
+        r += dr; c += dc
+    while 0 <= r < H and 0 <= c < W:
+        out[r][c] = marker_col
+        r += dr; c += dc
+
+    return out
+
+
+_solve_marker_ray = _make_category_solver(_solve_fn_marker_ray)
+
+
+def _solve_fn_smallest_rect_crop(inp):
+    """Multiple solid rectangles; output is the bounding box of the colour
+    with the smallest bounding-box area (H×W).
+    """
+    H, W = len(inp), len(inp[0])
+    by_col: dict = {}
+    for r in range(H):
+        for c in range(W):
+            v = inp[r][c]
+            if v != 0:
+                by_col.setdefault(v, []).append((r, c))
+    if len(by_col) < 2:
+        return None
+
+    def bbox_area(cells):
+        rows = [r for r, c in cells]
+        cols = [c for r, c in cells]
+        return (max(rows) - min(rows) + 1) * (max(cols) - min(cols) + 1)
+
+    winner = min(by_col, key=lambda c: bbox_area(by_col[c]))
+    cells = by_col[winner]
+    r0, r1 = min(r for r, c in cells), max(r for r, c in cells)
+    c0, c1 = min(c for r, c in cells), max(c for r, c in cells)
+    return [[inp[r][c] for c in range(c0, c1 + 1)] for r in range(r0, r1 + 1)]
+
+
+_solve_smallest_rect_crop = _make_category_solver(_solve_fn_smallest_rect_crop)
+
+
 def _always(d): return True  # noqa: E731  — permissive pre-filter; verify() is the gate
 
 
@@ -2024,6 +2402,13 @@ ALL_PRIMITIVES = [
     ("PROJECT_ONTO_RECT",             _always, _solve_project_onto_rect),
     ("CONNECT_DIAGONAL_PAIRS",        _always, _solve_connect_diagonal_pairs),
     ("NEAREST_BORDER_FILL",           _always, _solve_nearest_border_fill),
+    ("CONNECT_SAME_COLOUR",           _always, _solve_connect_same_colour),
+    ("ROW_COL_MASK_INTERSECT",        _always, _solve_row_col_mask_intersect),
+    ("TWO_CELL_CROSS",                _always, _solve_two_cell_cross),
+    ("SNAP_JOIN",                     _always, _solve_snap_join),
+    ("SINGLE_CELL_OUTPUT",            _always, _solve_single_cell_output),
+    ("MARKER_RAY",                    _always, _solve_marker_ray),
+    ("SMALLEST_RECT_CROP",            _always, _solve_smallest_rect_crop),
 ]
 
 

@@ -426,6 +426,17 @@ Tasks: `469497ad`, `007bbfb7`
 
 ---
 
+## `228f6490` — OBJECT_INTO_FRAME (coverage = 1)
+
+**Step 1:** Input contains one or more hollow frames (solid-border rectangles of colour 5 with hollow interiors) and several small floating objects (2×2 blocks, 1×2 strips, etc.) of various colours scattered around the grid.  
+**Step 2:** The floating objects look displaced — they have no "home" in the input layout.  
+**Step 3:** Each floating object's colour matches the fill that would go inside one of the frames; the output moves every floating object into the interior of its matching frame, centred or flush.  
+**Step 4:** For each hollow 5-bordered frame, find the floating object whose shape/colour corresponds; place it inside the frame's interior. Erase the object from its original position.
+
+**Coverage note:** Rule covers 1 task. The colour-matching between object and frame interior may be explicit (object colour = some frame marker) or structural. Confidence MEDIUM — full implementation needs to determine the matching criterion precisely.
+
+---
+
 ## `09629e4f` — SEPARATOR_GRID_POSITIONAL_MAP (coverage = 1)
 
 **Step 1:** 11×11 grid divided by colour-5 separator lines into a 3×3 array of 3×3 sub-cells. Each sub-cell either contains colour-8 (cyan) cells or content cells of other colours, but never both — except one sub-cell which has no colour-8 cells at all.  

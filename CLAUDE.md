@@ -1,5 +1,5 @@
 # CLAUDE.md
-*Last updated: 2026-06-06 10:14*
+*Last updated: 2026-06-06 10:32*
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -100,6 +100,8 @@ These patterns appear across dozens of tasks. Recognising the structure immediat
 ## Decomposition pre-step
 
 Before running the 4-step protocol, apply these 7 lenses to decompose the input. They answer "what kind of problem is this?" and dramatically narrow the hypothesis space.
+
+**"Background" is a conclusion, not an observation.** Do not label any colour as background until the output confirms it plays no active role. The most common colour is often background — but it may instead be a wall, a constraint, or a medium that the transformation acts through. Ask: *what does the path avoid? what stops the change?* A colour that appears unchanged in every output cell is not necessarily inert — it may be structurally load-bearing. Only call something background when you have verified it has no role.
 
 1. **Fixed vs. moving** — Which cells are identical between input and output? The remainder is the change. (If one object stays and another shifts, the rule is probably a translation or alignment.)
 2. **How many parts?** — Can non-zero cells be split into 2+ distinct connected components? If yes, do they behave differently?

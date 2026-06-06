@@ -2678,6 +2678,114 @@ def _solve_fn_tile_period_extract(inp):
 _solve_tile_period_extract = _make_category_solver(_solve_fn_tile_period_extract)
 
 
+def _solve_fn_singleton_frame(inp):
+    """Find the one cell whose colour appears exactly once; output a 3x3 ring of 2s centred on it."""
+    from collections import Counter
+    H, W = len(inp), len(inp[0])
+    flat = [(inp[r][c], r, c) for r in range(H) for c in range(W) if inp[r][c] != 0]
+    counts = Counter(v for v, r, c in flat)
+    singletons = [(v, r, c) for v, r, c in flat if counts[v] == 1]
+    if len(singletons) != 1:
+        return None
+    sv, sr, sc = singletons[0]
+    # frame must fit inside grid
+    if sr == 0 or sr == H - 1 or sc == 0 or sc == W - 1:
+        return None
+    out = [[0] * W for _ in range(H)]
+    for dr in (-1, 0, 1):
+        for dc in (-1, 0, 1):
+            if dr == 0 and dc == 0:
+                out[sr][sc] = sv
+            else:
+                out[sr + dr][sc + dc] = 2
+    return out
+
+_solve_singleton_frame = _make_category_solver(_solve_fn_singleton_frame)
+
+
+def _solve_fn_stamp_8_shapes(inp):
+    """One multicolour template + several congruent 8-shapes; replace 8-shapes with template colours."""
+    from collections import defaultdict
+    H, W = len(inp), len(inp[0])
+
+    # Separate 8-cells from non-8 non-zero cells
+    cells_8 = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == 8]
+    template_cells = [(r, c) for r in range(H) for c in range(W)
+                      if inp[r][c] != 0 and inp[r][c] != 8]
+    if not cells_8 or not template_cells:
+        return None
+
+    # Build template relative shape (normalised to top-left = 0,0)
+    tr0 = min(r for r, c in template_cells)
+    tc0 = min(c for r, c in template_cells)
+    template_shape = {(r - tr0, c - tc0): inp[r][c] for r, c in template_cells}
+    t_offsets = set(template_shape.keys())
+
+    # Find connected components of 8-cells
+    visited = set()
+    groups = []
+    for start in cells_8:
+        if start in visited:
+            continue
+        group = []
+        stack = [start]
+        while stack:
+            cur = stack.pop()
+            if cur in visited:
+                continue
+            visited.add(cur)
+            group.append(cur)
+            r, c = cur
+            for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]:
+                nb = (r+dr, c+dc)
+                if nb not in visited and inp[nb[0]][nb[1]] == 8 if 0 <= nb[0] < H and 0 <= nb[1] < W else False:
+                    stack.append(nb)
+        groups.append(group)
+
+    # Check every group matches the template shape
+    for group in groups:
+        r0 = min(r for r, c in group)
+        c0 = min(c for r, c in group)
+        g_offsets = {(r - r0, c - c0) for r, c in group}
+        if g_offsets != t_offsets:
+            return None
+
+    # Build output: zero everything, stamp template at each group position
+    out = [[0] * W for _ in range(H)]
+    for group in groups:
+        r0 = min(r for r, c in group)
+        c0 = min(c for r, c in group)
+        for (dr, dc), colour in template_shape.items():
+            out[r0 + dr][c0 + dc] = colour
+    return out
+
+_solve_stamp_8_shapes = _make_category_solver(_solve_fn_stamp_8_shapes)
+
+
+def _solve_fn_8_bbox_fill(inp):
+    """Within bounding box of all 8-cells, replace every non-8 cell with 3."""
+    H, W = len(inp), len(inp[0])
+    cells_8 = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == 8]
+    if not cells_8:
+        return None
+    r0 = min(r for r, c in cells_8)
+    r1 = max(r for r, c in cells_8)
+    c0 = min(c for r, c in cells_8)
+    c1 = max(c for r, c in cells_8)
+    # bbox must contain at least some non-8 cells to change
+    has_non8 = any(inp[r][c] != 8 for r in range(r0, r1+1) for c in range(c0, c1+1))
+    if not has_non8:
+        return None
+    out = [row[:] for row in inp]
+    for r in range(r0, r1 + 1):
+        for c in range(c0, c1 + 1):
+            if inp[r][c] != 8:
+                out[r][c] = 3
+    return out
+
+_solve_8_bbox_fill = _make_category_solver(_solve_fn_8_bbox_fill)
+
+
 def _always(d): return True  # noqa: E731  — permissive pre-filter; verify() is the gate
 
 
@@ -2759,6 +2867,9 @@ ALL_PRIMITIVES = [
     ("MARKER_TO_RECT",                _always, _solve_marker_to_rect),
     ("SEP_GRID_EXTRACT_QUADRANT",     _always, _solve_sep_grid_extract_quadrant),
     ("TILE_PERIOD_EXTRACT",            _always, _solve_tile_period_extract),
+    ("SINGLETON_FRAME",               _always, _solve_singleton_frame),
+    ("STAMP_8_SHAPES",                _always, _solve_stamp_8_shapes),
+    ("8_BBOX_FILL",                   _always, _solve_8_bbox_fill),
     ("PATH_THROUGH_WALLS",            _always, _solve_path_through_walls),
 ]
 

@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ARC puzzles are easy for humans but very hard for computers. Humans improve by recognising previously seen patterns and building up a bank of pattern experiences. When a new task doesn't match anything seen before, they combine existing experiences to form a new one. This project asks: **can a computer mimic that process?**
 
+### The real target: the evaluation set
+
+The 400 training tasks are **not** a completion checklist. They are 400 opportunities to discover, implement, and test generalizable solving methods. The true measure of success is coverage on the **400 evaluation tasks** — tasks we have never seen and will never inspect individually during development.
+
+When we work through a training task, the goal is not to tick it off. The goal is to extract a pattern that is likely to recur in the evaluation set and encode it as a robust, generalizable solver. A training task that yields no reusable insight is worth less than one that uncovers a broad family of rules, even if both get "solved."
+
+**The 400 training tasks run out eventually — when they do, the work stops. Every solver we build should be earning its place by being likely to fire on unseen tasks, not just the one that motivated it.**
+
 ### Roadmap (three stages)
 
 1. **Categorise** — Python algorithms build a growing taxonomy of task categories from features detectable in training pairs. A task can belong to multiple categories. The richer the taxonomy, the better the routing. *(In progress — see current coverage below.)*
@@ -16,19 +24,20 @@ ARC puzzles are easy for humans but very hard for computers. Humans improve by r
 
 ### Current state
 
-Platform is set up: VS Code + Claude Code on macOS, Python environment, GitHub repo, ARC training/evaluation data loaded. 400 training tasks; ~82 currently solved by rule-based solvers (68 pre-session + 14 added 2026-06-05).
+Platform is set up: VS Code + Claude Code on macOS, Python environment, GitHub repo, ARC training/evaluation data loaded. 400 training tasks; ~100 currently solved by rule-based solvers (as of 2026-06-06).
 
-**Active approach (from 2026-06-05):** Work through all unsolved training tasks one at a time. Apply the decomposition pre-step + 4-step protocol to each. Write a verified solver for every task where a rule can be derived. If stuck after one revision attempt, stop and ask the user immediately — do not stall alone.
+**Active approach:** Work through unsolved training tasks one at a time using the decomposition pre-step + 4-step protocol. For each task, the primary question is not "can I make this pass?" but "what generalizable rule does this reveal, and is my solver encoding the rule or the specific instance?" If stuck after one revision attempt, stop and ask the user immediately — do not stall alone.
 
-The category taxonomy remains available for routing but is no longer a gate. The primary output is a growing library of composable solver primitives and task-specific `solve(inp)` functions registered in `scripts/solvers.py`.
+The primary output is a growing library of composable solver primitives registered in `scripts/solvers.py`. Each primitive should be role-based and colour-agnostic wherever possible.
 
 ### Principles
 - Categories are defined on training pairs only — never the test pair.
 - A task can belong to multiple categories; categories are not mutually exclusive.
 - Start simple; grow complexity only when simpler approaches fail.
-- **Write a solver for every task whose rule can be verified.** Coverage of 1 training task is sufficient — a verified solver can still match evaluation tasks drawn from the same distribution. The old coverage ≥ 2 threshold is retired.
+- **Write a solver for every task whose rule can be verified** — but ask first whether the rule is general enough to justify a solver. Coverage of 1 training task is sufficient *if the rule is role-based and likely to recur*. A highly specific rule (e.g. one that only works for one exact grid size and colour) should be noted in the backlog rather than registered, unless it's a clear instance of a broader family.
 - **Build composable primitives.** When implementing a solver, check whether the sub-operations (bounding box, flood fill, line extension, hollow interior, etc.) already exist in `src/loader.py` or a utility module. If a new primitive is needed and likely to recur, extract it to the shared library rather than duplicating code. This keeps new solvers short.
 - **Generalise before you specify.** Before committing to a rule that names a specific colour, count, or position, ask: *does this need to be specific?* Prefer a rule that refers to a role (e.g. "the anchor block", "the unique colour", "the largest region") over one that names a literal value (e.g. "colour 1", "3 blocks", "bottom row"). A role-based rule generalises better to the evaluation set.
+- **Ask "will this fire on an unseen task?"** before registering any solver. If the answer is "only if the task is identical to the training one", the solver is too narrow. Widen the detection condition or move it to the backlog.
 
 ### Task triage cycle
 

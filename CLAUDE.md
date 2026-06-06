@@ -1,4 +1,5 @@
 # CLAUDE.md
+*Last updated: 2026-06-06*
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -43,13 +44,14 @@ The primary output is a growing library of composable solver primitives register
 
 For each task:
 
-1. **Decompose** — Apply the 7 decomposition lenses (see below) before hypothesising.
-2. **Verbal 4-step** — Apply the protocol in text. If no hypothesis emerges, stop and ask the user immediately.
-3. **Solver + verification** — Write `solve(inp)`, run against all training pairs.
-4. **Decision:**
+1. **Pattern match** — Scan the recurring structural patterns list first. If the task matches a named family, skip straight to implementation.
+2. **Decompose** — If no pattern match, apply the 7 decomposition lenses (see below).
+3. **Verbal 4-step** — Apply the protocol in text. If no hypothesis emerges, stop and ask the user immediately.
+4. **Solver + verification** — Write `solve(inp)`, run against all training pairs.
+5. **Decision:**
    - All pairs match → write module, register in `ALL_PRIMITIVES`, move on.
    - Some pairs fail → make one revision attempt. If still failing, stop and ask the user immediately.
-   - No hypothesis after decomposition + 4-step → stop and ask the user immediately.
+   - No hypothesis after pattern match + decomposition + 4-step → stop and ask the user immediately.
 
 **Time limit: ~1 minute per task.** If the rule isn't clear within that window, bring the user in rather than stalling. The user is a faster pattern-recogniser for novel tasks and should not be kept waiting.
 
@@ -68,53 +70,9 @@ Proceed without asking for confirmation on all local work:
 
 Do not run long autonomous batches that leave the user uninformed for more than ~1 minute. Prefer short task-by-task cycles with the user present.
 
-## Decomposition pre-step
-
-Before running the 4-step protocol, apply these 7 lenses to decompose the input. They answer "what kind of problem is this?" and dramatically narrow the hypothesis space.
-
-1. **Fixed vs. moving** — Which cells are identical between input and output? The remainder is the change. (If one object stays and another shifts, the rule is probably a translation or alignment.)
-2. **How many parts?** — Can non-zero cells be split into 2+ distinct connected components? If yes, do they behave differently?
-3. **Nature of the change** — For the part(s) that change, is the change: translation / rotation (90°, 180°, 270°) / reflection / recolouring / deletion / completion / scaling? Check rotation explicitly — shapes that look like reflections are often 180° rotations, and near-symmetric shapes may have a rotational gap being filled.
-4. **What drives the change?** — Is it self-determined (the shape implies the transformation) or indicator-driven (a marker cell or colour specifies what to do)? Specifically: are there **isolated single-cell markers** whose colours match special cells in a nearby template? If yes, the markers are encoding position/direction/orientation for where the template should be placed or extended.
-5. **Spatial relationship after** — Do parts end up touching, adjacent, aligned to a grid, or symmetric?
-6. **More structure than input?** — If the output is more symmetric, complete, or regular, the rule is likely *repair* or *complete*. If the output contains additional copies of a shape already present in the input, the rule is likely *stamp* or *extend*. Check this before analysing the markers — once you see "copies added", the markers only need to answer direction and colour.
-7. **Less content than input?** — If the output has fewer cells, colours, or a smaller grid, the rule is likely *extract* or *filter*.
-
-Only after these 7 lenses: run the 4-step protocol below.
-
-## ARC task analysis protocol
-
-When analysing an unknown task or bucket of tasks, run these steps **in order** before enumerating pixel-level features. The ordering is the point — it prevents defaulting to bottom-up feature cataloguing before higher-level patterns have been checked.
-
-1. **What is this input ALMOST?**
-   Check for near-regularity: almost uniform (a few contaminating cells), almost symmetric (one region breaks it), almost tiled (one tile is wrong or missing), almost identical to another region. If found, the transformation is likely *repair, extract, or complete* the near-regular structure.
-
-2. **What doesn't belong?**
-   Look for anomalous cells, colours out of place, broken regularity, or a single shape that violates an otherwise consistent pattern. The anomaly is often the answer — either it IS the output, or removing/repairing it IS the rule.
-
-3. **Hold input and output together — what rule connects them?**
-   The input and output together are the demonstration; the answer you are seeking is how to get from one to the other. The older framing ("what question is the input posing?") is a useful special case, but the general form is: treat each training pair as a worked example and ask what rule makes this output the inevitable consequence of this input. This matters because the role of individual cells often only becomes clear when you see both sides — the input alone does not tell you what a marker cell means.
-
-4. **What is the shortest *complete* rule that fits all training pairs?**
-   If the rule requires more than one sentence, the abstraction is probably wrong. Prefer rules with zero special cases over rules with one, and rules with one over rules with two. Critically: any observation from step 3 that distinguishes this rule from a plausible alternative must survive the compression. Brevity cannot come at the cost of correctness — "shortest" means no unnecessary words, not missing clauses.
-
-Only after steps 1–4 fail to yield a hypothesis: enumerate colours, shapes, and spatial features bottom-up.
-
-**Verification is mandatory before claiming HIGH confidence.** A rule described in words is a hypothesis. It only becomes HIGH confidence when a Python implementation produces zero mismatches across all training pairs. Write the solver inline, run it, and report the per-pair match results. If any pair fails, revise the rule — do not report HIGH confidence on a partial match. MEDIUM confidence means the rule has not been code-verified or has known gaps.
-
-**Read the training pairs in order — the first pair is often a legend.** When the first pair's output recolours a single-colour shape into two or more clearly geometric sub-shapes (e.g., 2×2 blocks and 3×1 strips), those shapes are the *tile types*, *stamps*, or *tools* available for the transformation. Later pairs are then instances of the same packing or placement rule applied to different inputs. If the first pair looks simpler or more structured than the rest, treat it as a worked example embedded inside the training data.
-
-**Batch analysis with a subagent.** When delegating a batch of tasks to an Explore subagent, the prompt must require code verification — not just verbal description. The subagent has Bash access and can run Python. A well-formed subagent prompt should ask it to: (1) read the raw grid numbers for each task, (2) apply the 4-step protocol, (3) write a candidate `solve(inp)` function, (4) run it against all training pairs, and (5) report the per-pair match results. Any task that doesn't produce `True` for every pair must be marked MEDIUM or lower. Tasks returned as HIGH confidence without code verification should be treated as MEDIUM until verified.
-
-**Worked example (5bd6f4ac):** Bottom-up cataloguing failed. Step 2 caught it instantly — grey cells in otherwise uniform-colour blocks are anomalies. Rule: repair by filling grey cells with the surrounding block colour. One sentence, zero special cases.
-
-**Worked example (4522001f):** An L-shape of green cells with a single red corner. Step 2 catches the red cell as anomaly, but "fix the anomaly" is not enough — fixing it gives a solid green block, which is not the output. Only by holding input and output together does the rule emerge: double the L-shape into a solid block; place a second identical copy with its inner corner adjacent to the free corner of the first block (the corner not touching the input border), and its outer sides bounded by black or the grid edge. The red cell is not an independent marker — it IS the free corner, fully derivable from the L-shape geometry alone.
-
-**Worked example (150deff5):** All-grey irregular shape. Steps 1–2 give nothing. Step 3 with the first pair as legend: the output fills the grey region with exactly two tile types — 2×2 cyan blocks and 3×1 red strips. The first pair's output is the legend. Later pairs tile different grey shapes using the same two tile types. Rule: pack the grey region with 2×2 cyan and 3×1 (or 1×3) red tiles, no overlaps, no gaps.
-
 ## Recurring structural patterns
 
-These patterns appear across dozens of tasks. Recognising the structure immediately suggests the transformation — check these before running the 4 steps.
+These patterns appear across dozens of tasks. Recognising the structure immediately suggests the transformation — scan this list **before** applying the 7 lenses or the 4-step protocol. If the task matches a named family, skip straight to implementation.
 
 **Regular grid of separator lines.** If a distinct colour forms continuous horizontal and vertical lines dividing the grid into a regular array of same-size cells, the rule operates per-cell. Common variants:
 - One cell is the "master" (densest or most complex); the rule stamps a recoloured copy of the master into every other cell.
@@ -136,6 +94,44 @@ These patterns appear across dozens of tasks. Recognising the structure immediat
 **Template + directional marker arms (STAMP_WITH_ARMS).** If the input contains a template shape and small clusters of other colours positioned adjacent to it (one cluster per direction), the output stamps copies of the template in each marker's colour, extending in the direction the marker indicates, repeating with gap=1 until the grid edge. Each marker cluster is a partial copy of the template placed at the first copy's position — this is how the direction and colour are encoded. Task 045e512c exemplifies this.
 
 **Input encodes its own output size via a border legend.** If the input contains a marginal annotation — an L-shaped border, a full edge row/column, or a corner region — whose colours or segment counts vary across training pairs while the core content stays the same, that annotation is a scale key. Count the distinct colours (or segments) in the annotation to derive the expansion factor; the first two training pairs together establish the mapping. Task 469497ad exemplifies this: the right column and bottom row form an L-border whose distinct-colour count equals (scale − 1), and the output is the full input scaled by that factor with diagonal marker rays added.
+
+## Decomposition pre-step
+
+Before running the 4-step protocol, apply these 7 lenses to decompose the input. They answer "what kind of problem is this?" and dramatically narrow the hypothesis space.
+
+1. **Fixed vs. moving** — Which cells are identical between input and output? The remainder is the change. (If one object stays and another shifts, the rule is probably a translation or alignment.)
+2. **How many parts?** — Can non-zero cells be split into 2+ distinct connected components? If yes, do they behave differently?
+3. **Nature of the change** — For the part(s) that change, is the change: translation / rotation (90°, 180°, 270°) / reflection / recolouring / deletion / completion / scaling? Check rotation explicitly — shapes that look like reflections are often 180° rotations, and near-symmetric shapes may have a rotational gap being filled.
+4. **What drives the change?** — Is it self-determined (the shape implies the transformation) or indicator-driven (a marker cell or colour specifies what to do)? Specifically: are there **isolated single-cell markers** whose colours match special cells in a nearby template? If yes, the markers are encoding position/direction/orientation for where the template should be placed or extended.
+5. **Spatial relationship after** — Do parts end up touching, adjacent, aligned to a grid, or symmetric?
+6. **More structure than input?** — If the output is more symmetric, complete, or regular, the rule is likely *repair* or *complete*. If the output contains additional copies of a shape already present in the input, the rule is likely *stamp* or *extend*. Check this before analysing the markers — once you see "copies added", the markers only need to answer direction and colour.
+7. **Less content than input?** — If the output has fewer cells, colours, or a smaller grid, the rule is likely *extract* or *filter*.
+
+Only after these 7 lenses: run the 4-step protocol below.
+
+## ARC task analysis protocol
+
+When analysing an unknown task or bucket of tasks, run these steps **in order** before enumerating pixel-level features. The ordering is the point — it prevents defaulting to bottom-up feature cataloguing before higher-level patterns have been checked.
+
+**Before step 1: read the training pairs in order.** If pair 0 looks simpler or more structured than the rest, treat it as a legend — its output defines the tile types, stamps, or tools available for all later pairs. The later pairs are then instances of the same rule applied to different inputs.
+
+1. **What is this input ALMOST?**
+   Check for near-regularity: almost uniform (a few contaminating cells), almost symmetric (one region breaks it), almost tiled (one tile is wrong or missing), almost identical to another region. If found, the transformation is likely *repair, extract, or complete* the near-regular structure.
+
+2. **What doesn't belong?**
+   Look for anomalous cells, colours out of place, broken regularity, or a single shape that violates an otherwise consistent pattern. The anomaly tells you *where* the rule acts — but not *what* the rule is. Its role (remove, repair, extend, or structural pivot) only becomes clear in step 3. Never act on a step-2 anomaly without completing step 3.
+
+3. **Hold input and output together — what rule connects them?**
+   The input and output together are the demonstration; the answer you are seeking is how to get from one to the other. The older framing ("what question is the input posing?") is a useful special case, but the general form is: treat each training pair as a worked example and ask what rule makes this output the inevitable consequence of this input. This matters because the role of individual cells often only becomes clear when you see both sides — the input alone does not tell you what a marker cell means.
+
+4. **What is the shortest *complete* rule that fits all training pairs?**
+   If the rule requires more than one sentence, the abstraction is probably wrong. Prefer rules with zero special cases over rules with one, and rules with one over rules with two. Critically: any observation from step 3 that distinguishes this rule from a plausible alternative must survive the compression. Brevity cannot come at the cost of correctness — "shortest" means no unnecessary words, not missing clauses.
+
+If steps 1–4 fail to yield a hypothesis, stop and ask the user immediately.
+
+**Verification is mandatory before claiming HIGH confidence.** A rule described in words is a hypothesis. It only becomes HIGH confidence when a Python implementation produces zero mismatches across all training pairs. Write the solver inline, run it, and report the per-pair match results. If any pair fails, revise the rule — do not report HIGH confidence on a partial match. MEDIUM confidence means the rule has not been code-verified or has known gaps.
+
+**Batch analysis with a subagent.** When delegating a batch of tasks to an Explore subagent, the prompt must require code verification — not just verbal description. The subagent has Bash access and can run Python. A well-formed subagent prompt should ask it to: (1) read the raw grid numbers for each task, (2) apply the 4-step protocol, (3) write a candidate `solve(inp)` function, (4) run it against all training pairs, and (5) report the per-pair match results. Any task that doesn't produce `True` for every pair must be marked MEDIUM or lower. Tasks returned as HIGH confidence without code verification should be treated as MEDIUM until verified.
 
 ## Environment setup
 

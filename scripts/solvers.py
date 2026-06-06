@@ -2358,6 +2358,23 @@ def _solve_fn_shape_to_colour(inp):
 _solve_shape_to_colour = _make_category_solver(_solve_fn_shape_to_colour)
 
 
+def _solve_fn_tile_double_horizontal(inp):
+    """Crop bounding box of all non-zero cells; tile it twice side by side.
+    Output is bbox_height × (2 × bbox_width).
+    """
+    H, W = len(inp), len(inp[0])
+    nz = [(r, c) for r in range(H) for c in range(W) if inp[r][c] != 0]
+    if not nz:
+        return None
+    r0, r1 = min(r for r, c in nz), max(r for r, c in nz)
+    c0, c1 = min(c for r, c in nz), max(c for r, c in nz)
+    bbox = [inp[r][c0:c1 + 1] for r in range(r0, r1 + 1)]
+    return [row + row for row in bbox]
+
+
+_solve_tile_double_horizontal = _make_category_solver(_solve_fn_tile_double_horizontal)
+
+
 def _always(d): return True  # noqa: E731  — permissive pre-filter; verify() is the gate
 
 
@@ -2432,6 +2449,7 @@ ALL_PRIMITIVES = [
     ("MARKER_RAY",                    _always, _solve_marker_ray),
     ("SMALLEST_RECT_CROP",            _always, _solve_smallest_rect_crop),
     ("SHAPE_TO_COLOUR",               _always, _solve_shape_to_colour),
+    ("TILE_DOUBLE_HORIZONTAL",        _always, _solve_tile_double_horizontal),
 ]
 
 

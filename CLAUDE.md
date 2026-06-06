@@ -1,5 +1,5 @@
 # CLAUDE.md
-*Last updated: 2026-06-06*
+*Last updated: 2026-06-06 10:14*
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -15,21 +15,21 @@ When we work through a training task, the goal is not to tick it off. The goal i
 
 **The 400 training tasks run out eventually — when they do, the work stops. Every solver we build should be earning its place by being likely to fire on unseen tasks, not just the one that motivated it.**
 
-### Roadmap (three stages)
+### What we have learned about the approach
 
-1. **Categorise** — Python algorithms build a growing taxonomy of task categories from features detectable in training pairs. A task can belong to multiple categories. The richer the taxonomy, the better the routing. *(In progress — see current coverage below.)*
+The original plan assumed that tasks would cluster into groups sharing a common rule, and that a solver per category would scale. In practice this hasn't held: most solvers end up specific to one task or a very small family. **Each ARC task tends to need its own solver.**
 
-2. **Solve per category** — For each category, develop a model (any kind: rule-based, ML, LLM-assisted) that predicts the correct output. Target: models that together cover ~50–60% of all tasks.
+This is not a failure — it reflects the nature of ARC. The tasks are deliberately diverse. The real leverage is not in finding group-level patterns but in developing good thinking tools: a process that lets us look at any new task and derive its rule quickly and reliably. The growing library of solvers is evidence that the process is working, not a route to a group-level shortcut.
 
-3. **Merge models** — Combine models for tasks spanning multiple categories or that resist categorisation, mimicking how humans combine prior experiences for novel puzzles.
+**The primary goal is therefore to equip Claude with the best possible analytical process** — the recurring structural patterns, the decomposition lenses, the 4-step protocol — so that each new task can be solved stand-alone, without needing a category to belong to.
 
 ### Current state
 
 Platform is set up: VS Code + Claude Code on macOS, Python environment, GitHub repo, ARC training/evaluation data loaded. 400 training tasks; ~100 currently solved by rule-based solvers (as of 2026-06-06).
 
-**Active approach:** Work through unsolved training tasks one at a time using the decomposition pre-step + 4-step protocol. For each task, the primary question is not "can I make this pass?" but "what generalizable rule does this reveal, and is my solver encoding the rule or the specific instance?" If stuck after one revision attempt, stop and ask the user immediately — do not stall alone.
+**Active approach:** Work through unsolved training tasks one at a time using the triage process. For each task, the primary question is not "can I make this pass?" but "what is the rule, and can I derive it from first principles using the process?" If stuck after one revision attempt, stop and ask the user immediately — do not stall alone.
 
-The primary output is a growing library of composable solver primitives registered in `scripts/solvers.py`. Each primitive should be role-based and colour-agnostic wherever possible.
+The primary output is a growing library of task-level solvers registered in `scripts/solvers.py`. Where sub-operations recur across solvers, extract them as shared primitives. But do not force generalisation — a solver that correctly handles one task is better than an abstraction that handles none well.
 
 ### Principles
 - Categories are defined on training pairs only — never the test pair.
@@ -52,6 +52,8 @@ For each task:
    - All pairs match → write module, register in `ALL_PRIMITIVES`, move on.
    - Some pairs fail → make one revision attempt. If still failing, stop and ask the user immediately.
    - No hypothesis after pattern match + decomposition + 4-step → stop and ask the user immediately.
+
+**No conclusion without process.** Before stating a rule or pattern, identify which step of the triage cycle produced it. If you can't, you've skipped the process — go back and run it. A confident-sounding answer reached by implicit pattern matching is not a conclusion; it's a hypothesis that hasn't been examined.
 
 **Time limit: ~1 minute per task.** If the rule isn't clear within that window, bring the user in rather than stalling. The user is a faster pattern-recogniser for novel tasks and should not be kept waiting.
 
@@ -128,6 +130,8 @@ When analysing an unknown task or bucket of tasks, run these steps **in order** 
    If the rule requires more than one sentence, the abstraction is probably wrong. Prefer rules with zero special cases over rules with one, and rules with one over rules with two. Critically: any observation from step 3 that distinguishes this rule from a plausible alternative must survive the compression. Brevity cannot come at the cost of correctness — "shortest" means no unnecessary words, not missing clauses.
 
 If steps 1–4 fail to yield a hypothesis, stop and ask the user immediately.
+
+**Before coding, predict pair 2 from the rule derived from pair 0.** State what pair 2's output should look like under the hypothesis, then check it against the actual output. If it doesn't match exactly — including the turn point, endpoint, colour, and extent — the rule is incomplete. Do not proceed to code until the prediction matches. A rule that fits pair 0 but cannot predict pair 2 is an observation, not a rule.
 
 **Verification is mandatory before claiming HIGH confidence.** A rule described in words is a hypothesis. It only becomes HIGH confidence when a Python implementation produces zero mismatches across all training pairs. Write the solver inline, run it, and report the per-pair match results. If any pair fails, revise the rule — do not report HIGH confidence on a partial match. MEDIUM confidence means the rule has not been code-verified or has known gaps.
 

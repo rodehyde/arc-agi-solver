@@ -2375,6 +2375,309 @@ def _solve_fn_tile_double_horizontal(inp):
 _solve_tile_double_horizontal = _make_category_solver(_solve_fn_tile_double_horizontal)
 
 
+def _solve_fn_spiral_fill(inp):
+    """All-zero square grid → clockwise inward spiral of colour 3.
+    Segment lengths: N, then pairs (N-1,N-1), (N-3,N-3), ..., (1,1).
+    """
+    H, W = len(inp), len(inp[0])
+    if H != W:
+        return None
+    if any(inp[r][c] != 0 for r in range(H) for c in range(W)):
+        return None
+    N = H
+    if N < 2:
+        return None
+    out = [[0] * N for _ in range(N)]
+    lengths = [N]
+    k = N - 1
+    while k > 0:
+        lengths.extend([k, k])
+        k -= 2
+    dr_list = [0, 1, 0, -1]
+    dc_list = [1, 0, -1, 0]
+    r, c = 0, 0
+    out[r][c] = 3
+    for _ in range(lengths[0] - 1):
+        c += 1
+        out[r][c] = 3
+    for seg_idx in range(1, len(lengths)):
+        dr = dr_list[seg_idx % 4]
+        dc = dc_list[seg_idx % 4]
+        for _ in range(lengths[seg_idx]):
+            r += dr
+            c += dc
+            out[r][c] = 3
+    return out
+
+
+_solve_spiral_fill = _make_category_solver(_solve_fn_spiral_fill)
+
+
+def _solve_fn_sep_grid_most_dots(inp):
+    """Separator grid: count non-zero cells per sub-cell; fill max-count sub-cells solid."""
+    H, W = len(inp), len(inp[0])
+    sep_rows = [r for r in range(H) if all(inp[r][c] == 5 for c in range(W))]
+    sep_cols = [c for c in range(W) if all(inp[r][c] == 5 for r in range(H))]
+    if not sep_rows or not sep_cols:
+        return None
+    row_bands, col_bands = [], []
+    prev = 0
+    for sr in sep_rows + [H]:
+        if sr > prev:
+            row_bands.append((prev, sr))
+        prev = sr + 1
+    prev = 0
+    for sc in sep_cols + [W]:
+        if sc > prev:
+            col_bands.append((prev, sc))
+        prev = sc + 1
+    colour = None
+    counts = {}
+    for ri, (r0, r1) in enumerate(row_bands):
+        for ci, (c0, c1) in enumerate(col_bands):
+            cnt = 0
+            for r in range(r0, r1):
+                for c in range(c0, c1):
+                    v = inp[r][c]
+                    if v != 0 and v != 5:
+                        cnt += 1
+                        colour = v
+            counts[(ri, ci)] = cnt
+    if colour is None:
+        return None
+    max_count = max(counts.values())
+    if max_count == 0:
+        return None
+    out = [[0] * W for _ in range(H)]
+    for sr in sep_rows:
+        for c in range(W):
+            out[sr][c] = 5
+    for sc in sep_cols:
+        for r in range(H):
+            out[r][sc] = 5
+    for (ri, ci), cnt in counts.items():
+        if cnt == max_count:
+            r0, r1 = row_bands[ri]
+            c0, c1 = col_bands[ci]
+            for r in range(r0, r1):
+                for c in range(c0, c1):
+                    out[r][c] = colour
+    return out
+
+
+_solve_sep_grid_most_dots = _make_category_solver(_solve_fn_sep_grid_most_dots)
+
+
+def _solve_fn_shore_cross(inp):
+    """Two shores (8 and 2): fill 0 cells in clear rows/cols with 3.
+    A row is clear if its interior (cols 1..W-2) is all 0.
+    A col is clear if its interior (rows 1..H-2) is all 0.
+    """
+    H, W = len(inp), len(inp[0])
+    colours = {inp[r][c] for r in range(H) for c in range(W) if inp[r][c] != 0}
+    if colours - {2, 8}:
+        return None
+    if 2 not in colours or 8 not in colours:
+        return None
+    clear_rows = {r for r in range(H) if all(inp[r][c] == 0 for c in range(1, W - 1))}
+    clear_cols = {c for c in range(W) if all(inp[r][c] == 0 for r in range(1, H - 1))}
+    if not clear_rows and not clear_cols:
+        return None
+    out = [row[:] for row in inp]
+    for r in range(H):
+        for c in range(W):
+            if inp[r][c] == 0 and (r in clear_rows or c in clear_cols):
+                out[r][c] = 3
+    return out
+
+
+_solve_shore_cross = _make_category_solver(_solve_fn_shore_cross)
+
+
+def _solve_fn_marker_to_rect(inp):
+    """Isolated markers aligned with a rectangle's row/col span fire rays to the rectangle edge."""
+    from collections import Counter
+    H, W = len(inp), len(inp[0])
+    bg = Counter(inp[r][c] for r in range(H) for c in range(W)).most_common(1)[0][0]
+    colours = {inp[r][c] for r in range(H) for c in range(W) if inp[r][c] != bg}
+    # Find the rectangle: colour forming a filled rectangular block (most cells)
+    best_rect = None
+    best_size = 0
+    for col in colours:
+        cells = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == col]
+        if len(cells) <= 1:
+            continue
+        rs = [r for r, c in cells]
+        cs = [c for r, c in cells]
+        r0, r1, c0, c1 = min(rs), max(rs), min(cs), max(cs)
+        if len(cells) == (r1 - r0 + 1) * (c1 - c0 + 1) and len(cells) > best_size:
+            best_rect = (col, r0, r1, c0, c1)
+            best_size = len(cells)
+    if best_rect is None:
+        return None
+    _, rr0, rr1, rc0, rc1 = best_rect
+    out = [row[:] for row in inp]
+    for col in colours:
+        if col == best_rect[0]:
+            continue
+        for r in range(H):
+            for c in range(W):
+                if inp[r][c] != col:
+                    continue
+                in_row = rr0 <= r <= rr1
+                in_col = rc0 <= c <= rc1
+                if in_row and not in_col:
+                    if c < rc0:
+                        for cc in range(c + 1, rc0):
+                            out[r][cc] = col
+                    else:
+                        for cc in range(rc1 + 1, c):
+                            out[r][cc] = col
+                elif in_col and not in_row:
+                    if r < rr0:
+                        for rr in range(r + 1, rr0):
+                            out[rr][c] = col
+                    else:
+                        for rr in range(rr1 + 1, r):
+                            out[rr][c] = col
+    return out
+
+
+_solve_marker_to_rect = _make_category_solver(_solve_fn_marker_to_rect)
+
+
+def _solve_fn_sep_grid_extract_quadrant(inp):
+    """Sep grid: output the quadrant containing the unique non-bg non-sep cell."""
+    from collections import Counter
+    H, W = len(inp), len(inp[0])
+    sep_rows = [r for r in range(H) if len(set(inp[r])) == 1]
+    sep_cols = [c for c in range(W) if len(set(inp[r][c] for r in range(H))) == 1]
+    if not sep_rows or not sep_cols:
+        return None
+    sep_colour = inp[sep_rows[0]][0]
+    row_bands, col_bands = [], []
+    prev = 0
+    for sr in sep_rows + [H]:
+        if sr > prev:
+            row_bands.append((prev, sr))
+        prev = sr + 1
+    prev = 0
+    for sc in sep_cols + [W]:
+        if sc > prev:
+            col_bands.append((prev, sc))
+        prev = sc + 1
+    flat = [inp[r][c] for r in range(H) for c in range(W) if inp[r][c] != sep_colour]
+    if not flat:
+        return None
+    bg = Counter(flat).most_common(1)[0][0]
+    for ri, (r0, r1) in enumerate(row_bands):
+        for ci, (c0, c1) in enumerate(col_bands):
+            for r in range(r0, r1):
+                for c in range(c0, c1):
+                    if inp[r][c] != bg and inp[r][c] != sep_colour:
+                        return [inp[row][c0:c1] for row in range(r0, r1)]
+    return None
+
+
+_solve_sep_grid_extract_quadrant = _make_category_solver(_solve_fn_sep_grid_extract_quadrant)
+
+
+def _solve_fn_path_through_walls(inp):
+    """3-cluster fires path toward 2-cluster, turning when blocked by 8s."""
+    H, W = len(inp), len(inp[0])
+    cells_3 = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == 3]
+    cells_2 = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == 2]
+    if not cells_3 or not cells_2:
+        return None
+    r3_min = min(r for r, c in cells_3)
+    r3_max = max(r for r, c in cells_3)
+    c3_min = min(c for r, c in cells_3)
+    c3_max = max(c for r, c in cells_3)
+    r2_ctr = sum(r for r, c in cells_2) / len(cells_2)
+    c2_ctr = sum(c for r, c in cells_2) / len(cells_2)
+    cells_2_set = set(cells_2)
+
+    def is_free(r, c):
+        return 0 <= r < H and 0 <= c < W and inp[r][c] == 0
+
+    def adj_to_2(r, c):
+        return any((r + dr, c + dc) in cells_2_set
+                   for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)])
+
+    def trace(sr, sc, dr, dc):
+        r, c = sr, sc
+        path = []
+        for _ in range(H * W):
+            if not (0 <= r < H and 0 <= c < W) or inp[r][c] != 0:
+                return None
+            path.append((r, c))
+            if adj_to_2(r, c):
+                return path
+            nr, nc = r + dr, c + dc
+            if is_free(nr, nc):
+                r, c = nr, nc
+            else:
+                perps = [(-dc, dr), (dc, -dr)]
+                perps.sort(key=lambda d: abs(r + d[0] - r2_ctr) + abs(c + d[1] - c2_ctr))
+                moved = False
+                for ndr, ndc in perps:
+                    if is_free(r + ndr, c + ndc):
+                        dr, dc = ndr, ndc
+                        r, c = r + ndr, c + ndc
+                        moved = True
+                        break
+                if not moved:
+                    return None
+        return None
+
+    # Exits: from the ends of the cluster, in the along-cluster direction
+    if r3_min == r3_max:  # horizontal cluster
+        exits = [(r3_min, c3_max + 1, 0, 1), (r3_min, c3_min - 1, 0, -1)]
+    else:                  # vertical cluster
+        exits = [(r3_min - 1, c3_min, -1, 0), (r3_max + 1, c3_min, 1, 0)]
+
+    for sr, sc, dr, dc in exits:
+        if is_free(sr, sc):
+            path = trace(sr, sc, dr, dc)
+            if path is not None:
+                out = [row[:] for row in inp]
+                for r, c in path:
+                    out[r][c] = 3
+                return out
+    return None
+
+
+_solve_path_through_walls = _make_category_solver(_solve_fn_path_through_walls)
+
+
+def _solve_fn_tile_period_extract(inp):
+    """Input is a grid tiled horizontally by period p (exact or mirror-alternating);
+    output is the first p columns. Only matches when p divides W at least 3 times."""
+    H, W = len(inp), len(inp[0])
+    for p in range(1, W):
+        if W % p != 0:
+            continue
+        reps = W // p
+        if reps < 3:
+            continue
+        tile = [list(inp[r][:p]) for r in range(H)]
+        tile_rev = [list(reversed(row)) for row in tile]
+        match = True
+        for r in range(H):
+            for c in range(reps):
+                seg = list(inp[r][c*p:(c+1)*p])
+                if seg != tile[r] and seg != tile_rev[r]:
+                    match = False
+                    break
+            if not match:
+                break
+        if match:
+            return tile
+    return None
+
+_solve_tile_period_extract = _make_category_solver(_solve_fn_tile_period_extract)
+
+
 def _always(d): return True  # noqa: E731  — permissive pre-filter; verify() is the gate
 
 
@@ -2450,6 +2753,13 @@ ALL_PRIMITIVES = [
     ("SMALLEST_RECT_CROP",            _always, _solve_smallest_rect_crop),
     ("SHAPE_TO_COLOUR",               _always, _solve_shape_to_colour),
     ("TILE_DOUBLE_HORIZONTAL",        _always, _solve_tile_double_horizontal),
+    ("SPIRAL_FILL",                   _always, _solve_spiral_fill),
+    ("SEP_GRID_MOST_DOTS",            _always, _solve_sep_grid_most_dots),
+    ("SHORE_CROSS",                   _always, _solve_shore_cross),
+    ("MARKER_TO_RECT",                _always, _solve_marker_to_rect),
+    ("SEP_GRID_EXTRACT_QUADRANT",     _always, _solve_sep_grid_extract_quadrant),
+    ("TILE_PERIOD_EXTRACT",            _always, _solve_tile_period_extract),
+    ("PATH_THROUGH_WALLS",            _always, _solve_path_through_walls),
 ]
 
 

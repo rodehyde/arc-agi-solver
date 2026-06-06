@@ -2786,6 +2786,222 @@ def _solve_fn_8_bbox_fill(inp):
 _solve_8_bbox_fill = _make_category_solver(_solve_fn_8_bbox_fill)
 
 
+def _solve_fn_gravity_to_floor(inp):
+    """1s fall to the bottom row, replacing the 5 at their column. All else unchanged."""
+    H, W = len(inp), len(inp[0])
+    # Bottom row must be all 5s
+    if not all(inp[H-1][c] == 5 for c in range(W)):
+        return None
+    ones = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == 1]
+    if not ones:
+        return None
+    out = [list(row) for row in inp]
+    for r, c in ones:
+        out[r][c] = 0
+        out[H-1][c] = 1
+    return out
+
+_solve_gravity_to_floor = _make_category_solver(_solve_fn_gravity_to_floor)
+
+
+def _solve_fn_stamp_at_marker_centre(inp):
+    """Vertical col-of-5s separator; 3×3 template top-left; 1-cells right of separator
+    are each replaced by the template centred on the marker cell."""
+    H, W = len(inp), len(inp[0])
+    sep_col = None
+    for c in range(W):
+        if all(inp[r][c] == 5 for r in range(H)):
+            sep_col = c
+            break
+    if sep_col is None:
+        return None
+    left_cells = [(r, c) for r in range(H) for c in range(sep_col) if inp[r][c] != 0]
+    if not left_cells:
+        return None
+    tr0 = min(r for r, c in left_cells)
+    tr1 = max(r for r, c in left_cells)
+    tc0 = min(c for r, c in left_cells)
+    tc1 = max(c for r, c in left_cells)
+    TH, TW = tr1 - tr0 + 1, tc1 - tc0 + 1
+    template = [[inp[tr0 + dr][tc0 + dc] for dc in range(TW)] for dr in range(TH)]
+    markers = [(r, c) for r in range(H) for c in range(sep_col + 1, W) if inp[r][c] == 1]
+    if not markers:
+        return None
+    out = [list(row) for row in inp]
+    cr, cc = TH // 2, TW // 2
+    for mr, mc in markers:
+        for dr in range(TH):
+            for dc in range(TW):
+                nr, nc = mr - cr + dr, mc - cc + dc
+                if 0 <= nr < H and 0 <= nc < W and nc != sep_col:
+                    out[nr][nc] = template[dr][dc]
+    return out
+
+_solve_stamp_at_marker_centre = _make_category_solver(_solve_fn_stamp_at_marker_centre)
+
+
+def _solve_fn_2_bbox_to_4(inp):
+    """Find clusters of 2-cells (Chebyshev distance ≤ 2 connectivity);
+    within each cluster's bounding box, replace non-zero non-2 cells with 4."""
+    H, W = len(inp), len(inp[0])
+    cells_2 = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == 2]
+    if not cells_2:
+        return None
+    visited = set()
+    groups = []
+    for start in cells_2:
+        if start in visited:
+            continue
+        group = []
+        queue = [start]
+        in_queue = {start}
+        while queue:
+            cur = queue.pop()
+            if cur in visited:
+                continue
+            visited.add(cur)
+            group.append(cur)
+            r, c = cur
+            for other in cells_2:
+                if other not in visited and other not in in_queue:
+                    if max(abs(other[0] - r), abs(other[1] - c)) <= 2:
+                        queue.append(other)
+                        in_queue.add(other)
+        groups.append(group)
+    out = [list(row) for row in inp]
+    for group in groups:
+        r0 = min(r for r, c in group); r1 = max(r for r, c in group)
+        c0 = min(c for r, c in group); c1 = max(c for r, c in group)
+        for r in range(r0, r1 + 1):
+            for c in range(c0, c1 + 1):
+                if inp[r][c] != 0 and inp[r][c] != 2:
+                    out[r][c] = 4
+    return out
+
+_solve_2_bbox_to_4 = _make_category_solver(_solve_fn_2_bbox_to_4)
+
+
+def _solve_fn_slide_up_to_1(inp):
+    """2-sticks in lower grid slide up column-by-column until top 2 is just below
+    the first 1 above; original positions cleared."""
+    H, W = len(inp), len(inp[0])
+    out = [list(row) for row in inp]
+    for c in range(W):
+        rows_2 = sorted(r for r in range(H) if inp[r][c] == 2)
+        if not rows_2:
+            continue
+        length = len(rows_2)
+        for r in rows_2:
+            out[r][c] = 0
+        top_2 = rows_2[0]
+        first_1 = next((r for r in range(top_2 - 1, -1, -1) if inp[r][c] == 1), None)
+        new_top = 0 if first_1 is None else first_1 + 1
+        for i in range(length):
+            if 0 <= new_top + i < H:
+                out[new_top + i][c] = 2
+    return out
+
+_solve_slide_up_to_1 = _make_category_solver(_solve_fn_slide_up_to_1)
+
+
+def _solve_fn_most_frequent_shape(inp):
+    """Input has multiple 3×3 shape instances in various colours scattered across a larger grid;
+    output is the most frequently occurring shape as a 3×3 grid."""
+    from collections import Counter, defaultdict
+    H, W = len(inp), len(inp[0])
+    by_colour = defaultdict(list)
+    for r in range(H):
+        for c in range(W):
+            if inp[r][c] != 0:
+                by_colour[inp[r][c]].append((r, c))
+    shape_instances = []
+    for colour, cells in by_colour.items():
+        cell_set = set(cells)
+        visited = set()
+        for start in cells:
+            if start in visited:
+                continue
+            comp = []
+            queue = [start]
+            visited.add(start)
+            while queue:
+                cr, cc = queue.pop()
+                comp.append((cr, cc))
+                for dr in (-1, 0, 1):
+                    for dc in (-1, 0, 1):
+                        if dr == 0 and dc == 0:
+                            continue
+                        nb = (cr + dr, cc + dc)
+                        if nb in cell_set and nb not in visited:
+                            visited.add(nb)
+                            queue.append(nb)
+            r0 = min(r for r, c in comp); r1 = max(r for r, c in comp)
+            c0 = min(c for r, c in comp); c1 = max(c for r, c in comp)
+            if r1 - r0 == 2 and c1 - c0 == 2:
+                mask = tuple(1 if inp[r0+dr][c0+dc] == colour else 0 for dr in range(3) for dc in range(3))
+                shape_instances.append((mask, colour))
+    if not shape_instances:
+        return None
+    mask_counts = Counter(mask for mask, colour in shape_instances)
+    best_mask = mask_counts.most_common(1)[0][0]
+    colour = next(col for mask, col in shape_instances if mask == best_mask)
+    return [[colour if best_mask[r * 3 + c] else 0 for c in range(3)] for r in range(3)]
+
+_solve_most_frequent_shape = _make_category_solver(_solve_fn_most_frequent_shape)
+
+
+def _solve_fn_l_shape_complete(inp):
+    """Each L-shaped trio of 8s (3 corners of a 2×2 square) gets a 1 at the missing corner."""
+    H, W = len(inp), len(inp[0])
+    cells_8 = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == 8]
+    cell_set = set(cells_8)
+    out = [list(row) for row in inp]
+    visited = set()
+    for start in cells_8:
+        if start in visited:
+            continue
+        comp = []
+        queue = [start]
+        visited.add(start)
+        while queue:
+            cr, cc = queue.pop()
+            comp.append((cr, cc))
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    nb = (cr + dr, cc + dc)
+                    if nb in cell_set and nb not in visited:
+                        visited.add(nb)
+                        queue.append(nb)
+        if len(comp) != 3:
+            continue
+        r0 = min(r for r, c in comp)
+        c0 = min(c for r, c in comp)
+        for dr in range(2):
+            for dc in range(2):
+                if (r0 + dr, c0 + dc) not in cell_set:
+                    out[r0 + dr][c0 + dc] = 1
+    return out
+
+_solve_l_shape_complete = _make_category_solver(_solve_fn_l_shape_complete)
+
+
+def _solve_fn_mirror_tile_2x2(inp):
+    """Input H×W; output 2H×2W by tiling: [inp|hflip] / [vflip|hvflip]."""
+    hflip = [list(reversed(row)) for row in inp]
+    vflip = list(reversed(inp))
+    hvflip = list(reversed(hflip))
+    out = []
+    for top, toph in zip(inp, hflip):
+        out.append(list(top) + list(toph))
+    for bot, both in zip(vflip, hvflip):
+        out.append(list(bot) + list(both))
+    return out
+
+_solve_mirror_tile_2x2 = _make_category_solver(_solve_fn_mirror_tile_2x2)
+
+
 def _always(d): return True  # noqa: E731  — permissive pre-filter; verify() is the gate
 
 
@@ -2870,6 +3086,13 @@ ALL_PRIMITIVES = [
     ("SINGLETON_FRAME",               _always, _solve_singleton_frame),
     ("STAMP_8_SHAPES",                _always, _solve_stamp_8_shapes),
     ("8_BBOX_FILL",                   _always, _solve_8_bbox_fill),
+    ("GRAVITY_TO_FLOOR",              _always, _solve_gravity_to_floor),
+    ("STAMP_AT_MARKER_CENTRE",        _always, _solve_stamp_at_marker_centre),
+    ("2_BBOX_TO_4",                   _always, _solve_2_bbox_to_4),
+    ("SLIDE_UP_TO_1",                 _always, _solve_slide_up_to_1),
+    ("MOST_FREQUENT_SHAPE",           _always, _solve_most_frequent_shape),
+    ("L_SHAPE_COMPLETE",              _always, _solve_l_shape_complete),
+    ("MIRROR_TILE_2X2",               _always, _solve_mirror_tile_2x2),
     ("PATH_THROUGH_WALLS",            _always, _solve_path_through_walls),
 ]
 

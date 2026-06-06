@@ -275,11 +275,13 @@ Tasks: `469497ad`, `007bbfb7`
 ## `3631a71a` — RESTORE_MASKED_REGULARITY (coverage = 1, see also 9ecd008a, f9012d9b)
 
 **Step 1:** Large 30×30 grid is almost entirely filled with non-zero values, with scattered rectangular blobs of colour 9 throughout.  
-**Step 2:** The colour-9 blobs are the anomaly — they break what should be a regular pattern.  
-**Step 3:** Removing the 9s, the remaining cells have near-perfect 180° rotational symmetry. The output replaces every 9 with the value at the point-symmetric position (row H−1−r, col W−1−c) relative to the grid centre.  
-**Step 4:** For each colour-9 cell at (r,c), replace it with inp[H−1−r, W−1−c] (the 180°-symmetric counterpart). Non-9 cells are unchanged.
+**Step 2:** The colour-9 blobs are the anomaly — they mask cells whose values must be inferred from the underlying regular structure.  
+**Step 3:** The non-9 cells have near-perfect **transposition symmetry**: inp[r,c] == inp[c,r] for all non-9 cells. Most 9s can be filled by reading inp[c,r] (the transpose counterpart). Positions where *both* (r,c) and (c,r) are 9 ("doubly-9") cannot be resolved by transposition alone — for these, rotation (e.g. rot90) may provide the answer.  
+**Step 4:** For each 9-cell at (r,c): if inp[c,r] ≠ 9, output[r][c] = inp[c,r]. For doubly-9 cells, try rotated counterparts (rot90, rot270) to find a non-9 match.
 
-**Coverage note:** Rule covers only 1 task. Belongs to RESTORE_REGULARITY family (see `9ecd008a`, `f9012d9b`). Difference: the mask colour (9) is scattered, not a contiguous block.
+**Coverage note:** Rule covers only 1 task. Belongs to RESTORE_REGULARITY family (see `9ecd008a`, `f9012d9b`). Key difficulty: the symmetry is transposition (main-diagonal reflection), not 180° point symmetry — and doubly-9 positions require a secondary symmetry (rotation) for full resolution.
+
+**Why this was hard:** Jumped immediately to the D4 mathematical toolkit (8 symmetry transforms) rather than reading the pairs first and asking "what is the grid almost?" The data shows transposition symmetry directly — but this was only discovered after exhausting the abstract toolkit. Lesson: let the data tell you the structure before invoking a pre-formed set of transforms.
 
 ---
 
@@ -447,3 +449,16 @@ Tasks: `469497ad`, `007bbfb7`
 **Verified manually against all 4 training pairs.**
 
 **Coverage note:** Rule covers only 1 task as stated. Likely a variant of SEPARATOR_GRID_SAME_SIZE_FILL family — the no-8 sub-cell acts as a template/legend for the output layout.
+
+---
+
+## `36d67576` — DECORATE_SHAPE_BY_2_ORIENTATION (coverage = 1)
+
+**Step 1:** Each input has one "complete" shape (top-left region) with 4-structure plus 1s, 2s, 3s already placed, and 2–3 "incomplete" shapes elsewhere that have the 4-structure and a 2 marker but no 1s or 3s.  
+**Step 2:** The incomplete shapes are missing their decoration colours 1 and 3.  
+**Step 3:** The complete shape is the template. For each incomplete shape, the 2-marker's position relative to the 4-structure's corner/bend encodes orientation. The full set of decorations from the template is applied to the incomplete shape under the D4 rotation/reflection that maps the template's 2-position to the incomplete shape's 2-position.  
+**Step 4:** (1) Identify complete shape (the one containing colours 1, 2, and 3). (2) Extract its 4-skeleton and record decoration offsets relative to the bend/corner. (3) For each incomplete shape: find its corner and 2-direction; compute the D4 transform that maps template's 2-direction to this shape's 2-direction (also checking that arm directions agree); apply that transform to all decoration offsets.
+
+**Example (pair 0):** All shapes are straight horizontal/vertical bars of length 5. 2 is always at one end, one step to the side. The decoration rule: 1s at odd distances from the 2 on the 2-side; 3s at even distances on the opposite side. Rotating the bar direction 90°/180°/270° gives the right decorations for each incomplete shape.
+
+**Coverage note:** Rule verified verbally across all 3 pairs. Solver NOT implemented — needs D4 transform logic plus shape-skeleton extraction (handles bars, L-shapes, plus-shapes). Estimated ~80 lines. Medium implementation complexity.

@@ -1,5 +1,5 @@
 # CLAUDE.md
-*Last updated: 2026-06-06 10:32*
+*Last updated: 2026-06-06*
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -56,6 +56,8 @@ For each task:
 **No conclusion without process.** Before stating a rule or pattern, identify which step of the triage cycle produced it. If you can't, you've skipped the process — go back and run it. A confident-sounding answer reached by implicit pattern matching is not a conclusion; it's a hypothesis that hasn't been examined.
 
 **Time limit: ~1 minute per task.** If the rule isn't clear within that window, bring the user in rather than stalling. The user is a faster pattern-recogniser for novel tasks and should not be kept waiting.
+
+**Do not reach for a mathematical toolkit before the data has suggested it.** When a task has structure (symmetry, periodicity, a group action), that structure will be *visible in the pairs* — you will see it before you name it. The right order is: (1) read the pairs, (2) ask "what is this grid almost?", (3) notice the structure concretely (e.g. "row r and column r seem to mirror each other"), (4) only then identify the mathematical abstraction that names what you observed (e.g. "that is transposition symmetry"). Running this in reverse — starting from a pre-formed toolkit of transforms (D4 group, symmetry families, rotation matrices) and testing each one — is a search strategy that can take minutes and may still miss the answer. It also bypasses the user, who can often see the structure in seconds. If you find yourself iterating through abstract cases without a concrete observation from the data anchoring you, stop immediately and ask the user.
 
 ### Autonomous operation
 

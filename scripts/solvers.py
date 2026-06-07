@@ -3910,6 +3910,117 @@ def _solve_fn_frame_stamp(inp):
 _solve_frame_stamp = _make_category_solver(_solve_fn_frame_stamp)
 
 
+def _solve_fn_extract_lr_symmetric(inp):
+    """d56f2372: multiple coloured shapes; exactly one is LR-symmetric; output = that shape cropped."""
+    from collections import defaultdict
+
+    def bfs4(sr, sc):
+        val = inp[sr][sc]
+        visited = {(sr, sc)}
+        queue = [(sr, sc)]
+        while queue:
+            r, c = queue.pop(0)
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < H and 0 <= nc < W and (nr, nc) not in visited and inp[nr][nc] == val:
+                    visited.add((nr, nc)); queue.append((nr, nc))
+        return visited
+
+    def crop(cells, colour):
+        rs = [r for r, c in cells]; cs = [c for r, c in cells]
+        r0, r1, c0, c1 = min(rs), max(rs), min(cs), max(cs)
+        g = [[0] * (c1 - c0 + 1) for _ in range(r1 - r0 + 1)]
+        for r, c in cells:
+            g[r - r0][c - c0] = colour
+        return g
+
+    H, W = len(inp), len(inp[0])
+    seen = set()
+    by_colour = defaultdict(set)
+    for r in range(H):
+        for c in range(W):
+            if inp[r][c] != 0 and (r, c) not in seen:
+                cells = bfs4(r, c)
+                seen |= cells
+                by_colour[inp[r][c]] |= cells
+
+    for colour, cells in sorted(by_colour.items()):
+        g = crop(cells, colour)
+        if all(row == list(reversed(row)) for row in g):
+            return g
+    return None
+
+
+_solve_extract_lr_symmetric = _make_category_solver(_solve_fn_extract_lr_symmetric)
+
+
+def _solve_fn_recolour_by_hole_count(inp):
+    """0a2355a6: all cells are 8; each 4-connected component is recoloured by number
+    of topological holes (enclosed background regions): {1->1, 2->3, 3->2, 4->4}."""
+    H, W = len(inp), len(inp[0])
+    hole_to_colour = {1: 1, 2: 3, 3: 2, 4: 4}
+
+    def bfs4(sr, sc):
+        val = inp[sr][sc]
+        visited = {(sr, sc)}; queue = [(sr, sc)]
+        while queue:
+            r, c = queue.pop(0)
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < H and 0 <= nc < W and (nr, nc) not in visited and inp[nr][nc] == val:
+                    visited.add((nr, nc)); queue.append((nr, nc))
+        return visited
+
+    def count_holes(cells):
+        rs = [r for r, c in cells]; cs = [c for r, c in cells]
+        r0, r1, c0, c1 = min(rs), max(rs), min(cs), max(cs)
+        pH, pW = r1 - r0 + 3, c1 - c0 + 3
+        sub = [[0] * pW for _ in range(pH)]
+        for r, c in cells:
+            sub[r - r0 + 1][c - c0 + 1] = 1
+        reachable = set()
+        queue = [(r, c) for r in range(pH) for c in range(pW)
+                 if sub[r][c] == 0 and (r == 0 or r == pH - 1 or c == 0 or c == pW - 1)]
+        reachable = set(queue)
+        while queue:
+            r, c = queue.pop(0)
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < pH and 0 <= nc < pW and (nr, nc) not in reachable and sub[nr][nc] == 0:
+                    reachable.add((nr, nc)); queue.append((nr, nc))
+        interior = [(r, c) for r in range(pH) for c in range(pW)
+                    if sub[r][c] == 0 and (r, c) not in reachable]
+        if not interior:
+            return 0
+        cell_set = set(interior); seen = set(); n = 0
+        for start in interior:
+            if start in seen:
+                continue
+            n += 1; q = [start]; seen.add(start)
+            while q:
+                r, c = q.pop(0)
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nb = (r + dr, c + dc)
+                    if nb in cell_set and nb not in seen:
+                        seen.add(nb); q.append(nb)
+        return n
+
+    out = [[0] * W for _ in range(H)]
+    seen = set()
+    for r in range(H):
+        for c in range(W):
+            if inp[r][c] != 0 and (r, c) not in seen:
+                cells = bfs4(r, c)
+                seen |= cells
+                colour = hole_to_colour.get(count_holes(cells), count_holes(cells))
+                for pr, pc in cells:
+                    out[pr][pc] = colour
+    return out
+
+
+_solve_recolour_by_hole_count = _make_category_solver(_solve_fn_recolour_by_hole_count)
+
+
 # ── Primitive registry ────────────────────────────────────────────────────────
 #
 # Order matters: more specific solvers should come first.
@@ -4020,6 +4131,8 @@ ALL_PRIMITIVES = [
     ("STAIRCASE_DIAGONAL",            _always, _solve_staircase_diagonal),
     ("LEGEND_ALIGN",                  _always, _solve_legend_align),
     ("FRAME_STAMP",                   _always, _solve_frame_stamp),
+    ("EXTRACT_LR_SYMMETRIC",          _always, _solve_extract_lr_symmetric),
+    ("RECOLOUR_BY_HOLE_COUNT",        _always, _solve_recolour_by_hole_count),
     ("DECORATE_SHAPE_BY_2_ORIENT",    _always, _solve_decorate_shape_by_2_orientation),
     ("PATH_THROUGH_WALLS",            _always, _solve_path_through_walls),
 ]

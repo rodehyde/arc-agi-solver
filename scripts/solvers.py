@@ -3692,6 +3692,224 @@ _solve_decorate_shape_by_2_orientation = _make_category_solver(
 def _always(d): return True  # noqa: E731  — permissive pre-filter; verify() is the gate
 
 
+# ── Evaluation-set solvers (discovered 2026-06-07) ───────────────────────────
+
+def _solve_fn_concentric_rings(inp):
+    """516b51b7: solid rectangles of 1s → concentric erosion layers.
+    Border=1, next layer=2, next=3, then alternates 2,3,..."""
+    H, W = len(inp), len(inp[0])
+    out = [list(r) for r in inp]
+    visited = [[False] * W for _ in range(H)]
+
+    def bfs(sr, sc):
+        q = [(sr, sc)]; cells = [(sr, sc)]; visited[sr][sc] = True
+        while q:
+            r, c = q.pop()
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < H and 0 <= nc < W and not visited[nr][nc] and inp[nr][nc] == 1:
+                    visited[nr][nc] = True; q.append((nr, nc)); cells.append((nr, nc))
+        return cells
+
+    for r in range(H):
+        for c in range(W):
+            if inp[r][c] == 1 and not visited[r][c]:
+                cells = bfs(r, c)
+                rs = [x for x, _ in cells]; cs = [x for _, x in cells]
+                r0, r1, c0, c1 = min(rs), max(rs), min(cs), max(cs)
+                for cr, cc in cells:
+                    dist = min(cr - r0, r1 - cr, cc - c0, c1 - cc)
+                    out[cr][cc] = 1 if dist == 0 else ((dist - 1) % 2) + 2
+    return out
+
+
+_solve_concentric_rings = _make_category_solver(_solve_fn_concentric_rings)
+
+
+def _solve_fn_match_recolor_ones(inp):
+    """2a5f8217: 1-colored shapes get replaced by the color of matching non-1 template."""
+    H, W = len(inp), len(inp[0])
+
+    def bfs8(sr, sc, val):
+        visited = set(); q = [(sr, sc)]; visited.add((sr, sc))
+        while q:
+            r, c = q.pop()
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0: continue
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < H and 0 <= nc < W and (nr, nc) not in visited and inp[nr][nc] == val:
+                        visited.add((nr, nc)); q.append((nr, nc))
+        return visited
+
+    def norm(cells):
+        rs = [r for r, c in cells]; cs = [c for r, c in cells]
+        r0, c0 = min(rs), min(cs)
+        return frozenset((r - r0, c - c0) for r, c in cells)
+
+    seen = set(); templates = {}; ones = []
+    for r in range(H):
+        for c in range(W):
+            v = inp[r][c]
+            if v == 0 or (r, c) in seen: continue
+            cells = bfs8(r, c, v); seen |= cells; ns = norm(cells)
+            if v != 1: templates[ns] = v
+            else: ones.append((ns, cells))
+
+    out = [list(r) for r in inp]
+    for ns, cells in ones:
+        color = templates.get(ns)
+        if color is not None:
+            for r, c in cells: out[r][c] = color
+    return out
+
+
+_solve_match_recolor_ones = _make_category_solver(_solve_fn_match_recolor_ones)
+
+
+def _solve_fn_double_diagonal(inp):
+    """f0afb749: double grid; non-zero → 2×2 block; \\-diagonal rays → 1s."""
+    H, W = len(inp), len(inp[0])
+    out = [[0] * (2 * W) for _ in range(2 * H)]
+    for r in range(H):
+        for c in range(W):
+            v = inp[r][c]
+            if v:
+                out[2*r][2*c] = out[2*r][2*c+1] = out[2*r+1][2*c] = out[2*r+1][2*c+1] = v
+    nz = [(r, c) for r in range(H) for c in range(W) if inp[r][c]]
+    for sr, sc in nz:
+        for dr, dc in [(-1, -1), (1, 1)]:
+            r, c = sr + dr, sc + dc
+            while 0 <= r < H and 0 <= c < W:
+                if inp[r][c] == 0:
+                    out[2*r][2*c] = 1; out[2*r+1][2*c+1] = 1
+                r += dr; c += dc
+    return out
+
+
+_solve_double_diagonal = _make_category_solver(_solve_fn_double_diagonal)
+
+
+def _solve_fn_staircase_diagonal(inp):
+    """1e97544e: staircase diagonal colour pattern with holes; fill zeros.
+    Cell (r,c): if r<=c → s[c%k], else s[(c+1)%k], where k=#distinct colors."""
+    H, W = len(inp), len(inp[0])
+    vals = set(v for row in inp for v in row if v != 0)
+    k = len(vals)
+    if k == 0: return None
+    s = [None] * k
+    for r in range(H):
+        for c in range(W):
+            v = inp[r][c]
+            if not v: continue
+            idx = (c % k) if r <= c else ((c + 1) % k)
+            if s[idx] is None: s[idx] = v
+            elif s[idx] != v: return None
+    if any(x is None for x in s): return None
+    out = [list(row) for row in inp]
+    for r in range(H):
+        for c in range(W):
+            if not out[r][c]:
+                idx = (c % k) if r <= c else ((c + 1) % k)
+                out[r][c] = s[idx]
+    return out
+
+
+_solve_staircase_diagonal = _make_category_solver(_solve_fn_staircase_diagonal)
+
+
+def _solve_fn_legend_align(inp):
+    """5af49b42: legend sequences in rows; isolated cells get legend placed
+    so matching color aligns at that column."""
+    H, W = len(inp), len(inp[0])
+    legend_seqs = []
+    for r in range(H):
+        row = inp[r]; c = 0
+        while c < W:
+            if row[c] != 0:
+                start = c
+                while c < W and row[c] != 0: c += 1
+                if c - start >= 2:
+                    legend_seqs.append([(r, start + i, row[start + i]) for i in range(c - start)])
+            else:
+                c += 1
+    legend_cells = set((r, c) for seq in legend_seqs for r, c, v in seq)
+    isolated = [(r, c, inp[r][c]) for r in range(H) for c in range(W)
+                if inp[r][c] != 0 and (r, c) not in legend_cells]
+    out = [list(row) for row in inp]
+    for ir, ic, iv in isolated:
+        for seq in legend_seqs:
+            colors = [v for r, c, v in seq]
+            if iv in colors:
+                pos = colors.index(iv)
+                start_col = ic - pos
+                for j, (sr, sc, sv) in enumerate(seq):
+                    wc = start_col + j
+                    if 0 <= wc < W:
+                        out[ir][wc] = sv
+                break
+    return out
+
+
+_solve_legend_align = _make_category_solver(_solve_fn_legend_align)
+
+
+def _solve_fn_frame_stamp(inp):
+    """f21745ec: one frame has internal pattern; stamp into same-size empty frames,
+    erase frames that are too small."""
+    H, W = len(inp), len(inp[0])
+    seen = set(); comps = []
+    for sr in range(H):
+        for sc in range(W):
+            v = inp[sr][sc]
+            if v == 0 or (sr, sc) in seen: continue
+            comp = set(); q = [(sr, sc)]; comp.add((sr, sc))
+            while q:
+                r, c = q.pop()
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < H and 0 <= nc < W and (nr, nc) not in comp and inp[nr][nc] == v:
+                        comp.add((nr, nc)); q.append((nr, nc))
+            seen |= comp
+            rs2 = [r for r, c in comp]; cs2 = [c for r, c in comp]
+            r0, r1, c0, c1 = min(rs2), max(rs2), min(cs2), max(cs2)
+            is_pf = (all(r == r0 or r == r1 or c == c0 or c == c1 for r, c in comp)
+                     and r1 > r0 and c1 > c0)
+            comps.append({"v": v, "r0": r0, "r1": r1, "c0": c0, "c1": c1,
+                          "cells": comp, "pure_frame": is_pf})
+
+    def has_interior_nz(comp):
+        r0, r1, c0, c1 = comp["r0"], comp["r1"], comp["c0"], comp["c1"]
+        return any(inp[r][c] != 0 for r in range(r0+1, r1) for c in range(c0+1, c1))
+
+    template = next((c for c in comps if not c["pure_frame"] and has_interior_nz(c)), None)
+    if template is None: return None
+
+    tr0, tr1, tc0, tc1 = template["r0"], template["r1"], template["c0"], template["c1"]
+    tv = template["v"]
+    iH = tr1 - tr0 - 1; iW = tc1 - tc0 - 1
+    interior = {(r - tr0 - 1, c - tc0 - 1): inp[r][c]
+                for r in range(tr0+1, tr1) for c in range(tc0+1, tc1) if inp[r][c] != 0}
+
+    def inside_template(cells):
+        return all(tr0 < r < tr1 and tc0 < c < tc1 for r, c in cells)
+
+    out = [[inp[r][c] for c in range(W)] for r in range(H)]
+    for fr in comps:
+        if fr is template or not fr["pure_frame"] or inside_template(fr["cells"]): continue
+        r0, r1, c0, c1 = fr["r0"], fr["r1"], fr["c0"], fr["c1"]
+        fiH = r1 - r0 - 1; fiW = c1 - c0 - 1; fc = fr["v"]
+        if fiH == iH and fiW == iW:
+            for (dr, dc), v in interior.items():
+                out[r0+1+dr][c0+1+dc] = fc if v == tv else v
+        else:
+            for r, c in fr["cells"]: out[r][c] = 0
+    return out
+
+
+_solve_frame_stamp = _make_category_solver(_solve_fn_frame_stamp)
+
+
 # ── Primitive registry ────────────────────────────────────────────────────────
 #
 # Order matters: more specific solvers should come first.
@@ -3796,6 +4014,12 @@ ALL_PRIMITIVES = [
     ("CROSSHAIR_4FOLD_MIRROR",        _always, _solve_crosshair_4fold_mirror),
     ("REPAIR_PERIODIC_TILE",          _always, _solve_repair_periodic_tile),
     ("MARKER_SELECT_SHAPE",           _always, _solve_marker_select_shape),
+    ("CONCENTRIC_RINGS",              _always, _solve_concentric_rings),
+    ("MATCH_RECOLOR_ONES",            _always, _solve_match_recolor_ones),
+    ("DOUBLE_DIAGONAL",               _always, _solve_double_diagonal),
+    ("STAIRCASE_DIAGONAL",            _always, _solve_staircase_diagonal),
+    ("LEGEND_ALIGN",                  _always, _solve_legend_align),
+    ("FRAME_STAMP",                   _always, _solve_frame_stamp),
     ("DECORATE_SHAPE_BY_2_ORIENT",    _always, _solve_decorate_shape_by_2_orientation),
     ("PATH_THROUGH_WALLS",            _always, _solve_path_through_walls),
 ]

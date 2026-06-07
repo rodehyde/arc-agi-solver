@@ -3002,6 +3002,693 @@ def _solve_fn_mirror_tile_2x2(inp):
 _solve_mirror_tile_2x2 = _make_category_solver(_solve_fn_mirror_tile_2x2)
 
 
+def _solve_fn_antidiag_plus_floor(inp):
+    """H×H grid with left column all one colour, rest zeros.
+    Output: anti-diagonal of 2s from top-right stepping down-left; bottom row cols 1+ become 4."""
+    H, W = len(inp), len(inp[0])
+    col0 = inp[0][0]
+    if col0 == 0:
+        return None
+    if not all(inp[r][0] == col0 for r in range(H)):
+        return None
+    if any(inp[r][c] != 0 for r in range(H) for c in range(1, W)):
+        return None
+    out = [list(row) for row in inp]
+    for r in range(H - 1):
+        c = W - 1 - r
+        if 0 <= c < W:
+            out[r][c] = 2
+    for c in range(1, W):
+        out[H - 1][c] = 4
+    return out
+
+_solve_antidiag_plus_floor = _make_category_solver(_solve_fn_antidiag_plus_floor)
+
+
+def _solve_fn_comb_middle_row(inp):
+    """Each 3-row solid coloured rectangle gets its middle row combed:
+    every odd-offset cell (relative to rectangle's left edge) zeroed."""
+    H, W = len(inp), len(inp[0])
+    out = [list(row) for row in inp]
+    r = 0
+    while r < H - 2:
+        nz = [(c, inp[r][c]) for c in range(W) if inp[r][c] != 0]
+        if not nz:
+            r += 1; continue
+        colour = nz[0][1]
+        c0 = nz[0][0]; c1 = nz[-1][0]
+        def solid(ri, c0, c1, col):
+            return all(inp[ri][c] == col for c in range(c0, c1 + 1))
+        if solid(r, c0, c1, colour) and solid(r+1, c0, c1, colour) and solid(r+2, c0, c1, colour):
+            for c in range(c0, c1 + 1):
+                if (c - c0) % 2 == 1:
+                    out[r + 1][c] = 0
+            r += 3
+        else:
+            r += 1
+    return out
+
+_solve_comb_middle_row = _make_category_solver(_solve_fn_comb_middle_row)
+
+
+def _solve_fn_frame_expand_swap(inp):
+    """Hollow frame (border B, interior I): swap B↔I within frame; extend arms outward
+    by interior size in all 4 directions, filled with B."""
+    H, W = len(inp), len(inp[0])
+    nz = [(r, c, inp[r][c]) for r in range(H) for c in range(W) if inp[r][c] != 0]
+    if not nz:
+        return None
+    colours = set(v for _, _, v in nz)
+    if len(colours) != 2:
+        return None
+    r0 = min(r for r, c, v in nz); r1 = max(r for r, c, v in nz)
+    c0 = min(c for r, c, v in nz); c1 = max(c for r, c, v in nz)
+    FH, FW = r1 - r0 + 1, c1 - c0 + 1
+    if FH < 3 or FW < 3:
+        return None
+    B = inp[r0][c0]  # corner cell = border colour
+    I = next(v for _, _, v in nz if v != B)
+    Hi, Wi = FH - 2, FW - 2
+    out = [list(row) for row in inp]
+    for r in range(r0, r1 + 1):
+        for c in range(c0, c1 + 1):
+            if inp[r][c] == B:
+                out[r][c] = I
+            elif inp[r][c] == I:
+                out[r][c] = B
+    for dr in range(1, Hi + 1):
+        for c in range(c0, c1 + 1):
+            if 0 <= r0 - dr < H:
+                out[r0 - dr][c] = B
+            if 0 <= r1 + dr < H:
+                out[r1 + dr][c] = B
+    for dc in range(1, Wi + 1):
+        for r in range(r0, r1 + 1):
+            if 0 <= c0 - dc < W:
+                out[r][c0 - dc] = B
+            if 0 <= c1 + dc < W:
+                out[r][c1 + dc] = B
+    return out
+
+_solve_frame_expand_swap = _make_category_solver(_solve_fn_frame_expand_swap)
+
+
+def _solve_fn_corner_frame_extract(inp):
+    """4 corner markers (one colour) define a rectangular frame; extract interior
+    and recolour shape colour to marker colour."""
+    H, W = len(inp), len(inp[0])
+    nz = [(r, c, inp[r][c]) for r in range(H) for c in range(W) if inp[r][c] != 0]
+    if not nz:
+        return None
+    colour_cells: dict = {}
+    for r, c, v in nz:
+        colour_cells.setdefault(v, []).append((r, c))
+    marker_colour = None
+    mr0 = mr1 = mc0 = mc1 = 0
+    for v, cells in colour_cells.items():
+        if len(cells) != 4:
+            continue
+        rs = [r for r, c in cells]
+        cs = [c for r, c in cells]
+        r0, r1, c0, c1 = min(rs), max(rs), min(cs), max(cs)
+        if set(cells) == {(r0, c0), (r0, c1), (r1, c0), (r1, c1)}:
+            marker_colour = v
+            mr0, mr1, mc0, mc1 = r0, r1, c0, c1
+            break
+    if marker_colour is None:
+        return None
+    shape_colours = set(v for _, _, v in nz if v != marker_colour)
+    if len(shape_colours) != 1:
+        return None
+    shape_colour = shape_colours.pop()
+    out = []
+    for r in range(mr0 + 1, mr1):
+        row = []
+        for c in range(mc0 + 1, mc1):
+            v = inp[r][c]
+            row.append(marker_colour if v == shape_colour else v)
+        out.append(row)
+    return out
+
+
+_solve_corner_frame_extract = _make_category_solver(_solve_fn_corner_frame_extract)
+
+
+def _solve_fn_stamp_colour_encoded_flip(inp):
+    """Template has a special-colour cell (same colour as isolated marker cells).
+    Stamp the template at each matching marker. Special colour encodes transform:
+    colour 2 → horizontal flip; colour 3 → identity."""
+    H, W = len(inp), len(inp[0])
+    cell_set = {(r, c) for r in range(H) for c in range(W) if inp[r][c] != 0}
+    visited: set = set()
+    components = []
+    for start in sorted(cell_set):
+        if start in visited:
+            continue
+        comp: list = []
+        queue = [start]
+        in_q = {start}
+        while queue:
+            cur = queue.pop()
+            visited.add(cur)
+            comp.append(cur)
+            r, c = cur
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    nb = (r + dr, c + dc)
+                    if nb in cell_set and nb not in visited and nb not in in_q:
+                        queue.append(nb)
+                        in_q.add(nb)
+        components.append(comp)
+    templates = [c for c in components if len(c) > 1]
+    markers = [c[0] for c in components if len(c) == 1]
+    if not templates or not markers:
+        return None
+    marker_colors = {inp[r][c] for r, c in markers}
+    out = [list(row) for row in inp]
+    for tmpl in templates:
+        color_cells: dict = {}
+        for r, c in tmpl:
+            color_cells.setdefault(inp[r][c], []).append((r, c))
+        special_color = None
+        for col, cells in color_cells.items():
+            if len(cells) == 1 and col in marker_colors:
+                special_color = col
+                special_cell = cells[0]
+                break
+        if special_color is None:
+            continue
+        do_hflip = (special_color == 2)
+        sr, sc = special_cell
+        offsets = {(r - sr, c - sc): inp[r][c] for r, c in tmpl}
+        if do_hflip:
+            offsets = {(dr, -dc): col for (dr, dc), col in offsets.items()}
+        for mr, mc in markers:
+            if inp[mr][mc] != special_color:
+                continue
+            for (dr, dc), col in offsets.items():
+                nr, nc = mr + dr, mc + dc
+                if 0 <= nr < H and 0 <= nc < W:
+                    out[nr][nc] = col
+    return out
+
+
+_solve_stamp_colour_encoded_flip = _make_category_solver(_solve_fn_stamp_colour_encoded_flip)
+
+
+def _solve_fn_largest_zero_rect(inp):
+    """Fill the largest axis-aligned all-zero rectangle with 6.
+    Rows containing any non-{0,1} cell (e.g. 5-markers) are treated as full barriers."""
+    H, W = len(inp), len(inp[0])
+    heights = [0] * W
+    best = (0, 0, 0, 0, 0)  # area, r0, r1, c0, c1
+    for r in range(H):
+        row_has_marker = any(inp[r][c] not in (0, 1) for c in range(W))
+        for c in range(W):
+            heights[c] = 0 if row_has_marker or inp[r][c] != 0 else heights[c] + 1
+        stack: list = []
+        for c in range(W + 1):
+            h = heights[c] if c < W else 0
+            left = c
+            while stack and stack[-1][0] > h:
+                ph, pl = stack.pop()
+                area = ph * (c - pl)
+                if area > best[0]:
+                    best = (area, r - ph + 1, r, pl, c - 1)
+                left = pl
+            if h > 0 and (not stack or stack[-1][0] < h):
+                stack.append((h, left))
+    if best[0] == 0:
+        return None
+    _, r0, r1, c0, c1 = best
+    out = [list(row) for row in inp]
+    for rr in range(r0, r1 + 1):
+        for cc in range(c0, c1 + 1):
+            out[rr][cc] = 6
+    return out
+
+
+_solve_largest_zero_rect = _make_category_solver(_solve_fn_largest_zero_rect)
+
+
+def _solve_fn_frame_crop_5(inp):
+    """5-cells form the vertical sides of a rectangular frame with 8-corner cells.
+    Crop the subgrid from (min_5_row-1, min_5_col) to (max_5_row+1, max_5_col)."""
+    H, W = len(inp), len(inp[0])
+    fives = [(r, c) for r in range(H) for c in range(W) if inp[r][c] == 5]
+    if not fives:
+        return None
+    r0 = min(r for r, c in fives) - 1
+    r1 = max(r for r, c in fives) + 1
+    c0 = min(c for r, c in fives)
+    c1 = max(c for r, c in fives)
+    if r0 < 0 or r1 >= H:
+        return None
+    return [list(inp[r][c0:c1 + 1]) for r in range(r0, r1 + 1)]
+
+
+_solve_frame_crop_5 = _make_category_solver(_solve_fn_frame_crop_5)
+
+
+def _solve_fn_gravity_to_5block(inp):
+    """Colored dots fall toward the 5-block (horizontally or vertically); they
+    stack adjacent to the 5-edge and recolor to 5. Original dot positions → 0."""
+    from collections import defaultdict
+    H, W = len(inp), len(inp[0])
+    five_rows = [r for r in range(H) if all(inp[r][c] == 5 for c in range(W))]
+    five_cols = [c for c in range(W) if all(inp[r][c] == 5 for r in range(H))]
+    if not five_rows and not five_cols:
+        return None
+    out = [[0] * W for _ in range(H)]
+    for r in range(H):
+        for c in range(W):
+            if inp[r][c] == 5:
+                out[r][c] = 5
+    if five_rows:
+        r_top = min(five_rows)
+        r_bot = max(five_rows)
+        above: dict = defaultdict(list)
+        below: dict = defaultdict(list)
+        for r in range(H):
+            for c in range(W):
+                if inp[r][c] not in (0, 5):
+                    if r < r_top:
+                        above[c].append(r)
+                    elif r > r_bot:
+                        below[c].append(r)
+        for c, rows in above.items():
+            for i, _ in enumerate(sorted(rows, reverse=True)):
+                nr = r_top - 1 - i
+                if 0 <= nr < H:
+                    out[nr][c] = 5
+        for c, rows in below.items():
+            for i, _ in enumerate(sorted(rows)):
+                nr = r_bot + 1 + i
+                if 0 <= nr < H:
+                    out[nr][c] = 5
+    else:
+        c_left = min(five_cols)
+        c_right = max(five_cols)
+        left_side: dict = defaultdict(list)
+        right_side: dict = defaultdict(list)
+        for r in range(H):
+            for c in range(W):
+                if inp[r][c] not in (0, 5):
+                    if c < c_left:
+                        left_side[r].append(c)
+                    elif c > c_right:
+                        right_side[r].append(c)
+        for r, cols in left_side.items():
+            for i, _ in enumerate(sorted(cols, reverse=True)):
+                nc = c_left - 1 - i
+                if 0 <= nc < W:
+                    out[r][nc] = 5
+        for r, cols in right_side.items():
+            for i, _ in enumerate(sorted(cols)):
+                nc = c_right + 1 + i
+                if 0 <= nc < W:
+                    out[r][nc] = 5
+    return out
+
+
+_solve_gravity_to_5block = _make_category_solver(_solve_fn_gravity_to_5block)
+
+
+def _solve_fn_frame_crosshair(inp):
+    """Each rectangular 1-frame gets a crosshair of 6s through its centre row and
+    column, extending to the grid edges. 1-cells are not overwritten."""
+    H, W = len(inp), len(inp[0])
+    cells_1 = {(r, c) for r in range(H) for c in range(W) if inp[r][c] == 1}
+    if not cells_1:
+        return None
+    visited: set = set()
+    frames = []
+    for start in cells_1:
+        if start in visited:
+            continue
+        comp: list = []
+        queue = [start]
+        in_q = {start}
+        while queue:
+            cur = queue.pop()
+            visited.add(cur)
+            comp.append(cur)
+            r, c = cur
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nb = (r + dr, c + dc)
+                if nb in cells_1 and nb not in visited and nb not in in_q:
+                    queue.append(nb)
+                    in_q.add(nb)
+        frames.append(comp)
+    out = [list(row) for row in inp]
+    for frame in frames:
+        r0 = min(r for r, c in frame)
+        r1 = max(r for r, c in frame)
+        c0 = min(c for r, c in frame)
+        c1 = max(c for r, c in frame)
+        cr = (r0 + r1) // 2
+        cc = (c0 + c1) // 2
+        for c in range(W):
+            if inp[cr][c] != 1:
+                out[cr][c] = 6
+        for r in range(H):
+            if inp[r][cc] != 1:
+                out[r][cc] = 6
+    return out
+
+
+_solve_frame_crosshair = _make_category_solver(_solve_fn_frame_crosshair)
+
+
+def _solve_fn_remove_isolated_singletons(inp):
+    """Remove non-zero cells that have no 8-adjacent non-zero neighbour (isolated singletons).
+    All cells that share at least one 8-neighbour with another non-zero cell are kept unchanged.
+    Task 42a50994."""
+    H, W = len(inp), len(inp[0])
+    out = [list(row) for row in inp]
+    for r in range(H):
+        for c in range(W):
+            if inp[r][c] == 0:
+                continue
+            has_nb = any(
+                0 <= r + dr < H and 0 <= c + dc < W and inp[r + dr][c + dc] != 0
+                for dr in (-1, 0, 1) for dc in (-1, 0, 1)
+                if not (dr == 0 and dc == 0)
+            )
+            if not has_nb:
+                out[r][c] = 0
+    return out
+
+
+_solve_remove_isolated_singletons = _make_category_solver(
+    _solve_fn_remove_isolated_singletons
+)
+
+
+def _solve_fn_hollow_rectangles(inp):
+    """Each solid filled rectangle becomes a hollow frame (perimeter kept, interior zeroed).
+    Processes each colour independently by bounding box. Task 4347f46a."""
+    H, W = len(inp), len(inp[0])
+    out = [list(row) for row in inp]
+    processed = set()
+    for r in range(H):
+        for c in range(W):
+            v = inp[r][c]
+            if v == 0 or (r, c) in processed:
+                continue
+            cells = [(rr, cc) for rr in range(H) for cc in range(W) if inp[rr][cc] == v]
+            rs = [x for x, _ in cells]; cs = [x for _, x in cells]
+            r0, r1, c0, c1 = min(rs), max(rs), min(cs), max(cs)
+            for rr in range(r0 + 1, r1):
+                for cc in range(c0 + 1, c1):
+                    out[rr][cc] = 0
+            for rc, cc in cells:
+                processed.add((rc, cc))
+    return out
+
+
+_solve_hollow_rectangles = _make_category_solver(_solve_fn_hollow_rectangles)
+
+
+def _solve_fn_frame_gap_fill(inp):
+    """1-cell frames with one gap side + interior marker cell. Fill interior with marker,
+    fill the gap, extend a full-width line of marker one step beyond the gap.
+    Task 444801d8."""
+    H, W = len(inp), len(inp[0])
+    cells_1 = {(r, c) for r in range(H) for c in range(W) if inp[r][c] == 1}
+    visited = set(); groups = []
+    for start in cells_1:
+        if start in visited: continue
+        comp = []; q = [start]; inq = {start}
+        while q:
+            cur = q.pop(); visited.add(cur); comp.append(cur)
+            r, c = cur
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nb = (r + dr, c + dc)
+                if nb in cells_1 and nb not in visited and nb not in inq:
+                    q.append(nb); inq.add(nb)
+        groups.append(comp)
+    out = [list(row) for row in inp]
+    for frame in groups:
+        rs = [r for r, c in frame]; cs = [c for r, c in frame]
+        r0, r1, c0, c1 = min(rs), max(rs), min(cs), max(cs)
+        mk = next((inp[r][c] for r in range(r0, r1 + 1) for c in range(c0, c1 + 1)
+                   if inp[r][c] not in (0, 1)), None)
+        if mk is None: continue
+        for r in range(r0 + 1, r1):
+            for c in range(c0 + 1, c1): out[r][c] = mk
+        if not all(inp[r0][c] == 1 for c in range(c0, c1 + 1)):
+            for c in range(c0, c1 + 1):
+                if inp[r0][c] == 0: out[r0][c] = mk
+            if r0 - 1 >= 0:
+                for c in range(c0, c1 + 1): out[r0 - 1][c] = mk
+        elif not all(inp[r1][c] == 1 for c in range(c0, c1 + 1)):
+            for c in range(c0, c1 + 1):
+                if inp[r1][c] == 0: out[r1][c] = mk
+            if r1 + 1 < H:
+                for c in range(c0, c1 + 1): out[r1 + 1][c] = mk
+        elif not all(inp[r][c0] == 1 for r in range(r0, r1 + 1)):
+            for r in range(r0, r1 + 1):
+                if inp[r][c0] == 0: out[r][c0] = mk
+            if c0 - 1 >= 0:
+                for r in range(r0, r1 + 1): out[r][c0 - 1] = mk
+        else:
+            for r in range(r0, r1 + 1):
+                if inp[r][c1] == 0: out[r][c1] = mk
+            if c1 + 1 < W:
+                for r in range(r0, r1 + 1): out[r][c1 + 1] = mk
+    return out
+
+
+_solve_frame_gap_fill = _make_category_solver(_solve_fn_frame_gap_fill)
+
+
+def _solve_fn_square_hole_fill(inp):
+    """5-cell frames whose interior holes form a square (n×n) get the holes filled with 2.
+    Non-square or irregular holes are left unchanged. Task 44d8ac46."""
+    H, W = len(inp), len(inp[0])
+    cells_5 = {(r, c) for r in range(H) for c in range(W) if inp[r][c] == 5}
+    visited = set(); groups = []
+    for start in cells_5:
+        if start in visited: continue
+        comp = []; q = [start]; inq = {start}
+        while q:
+            cur = q.pop(); visited.add(cur); comp.append(cur)
+            r, c = cur
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nb = (r + dr, c + dc)
+                if nb in cells_5 and nb not in visited and nb not in inq:
+                    q.append(nb); inq.add(nb)
+        groups.append(comp)
+    out = [list(row) for row in inp]
+    for comp in groups:
+        rs = [r for r, c in comp]; cs = [c for r, c in comp]
+        r0, r1, c0, c1 = min(rs), max(rs), min(cs), max(cs)
+        holes = [(r, c) for r in range(r0, r1 + 1) for c in range(c0, c1 + 1) if inp[r][c] == 0]
+        if not holes: continue
+        hr = [r for r, c in holes]; hc = [c for r, c in holes]
+        hr0, hr1, hc0, hc1 = min(hr), max(hr), min(hc), max(hc)
+        h, w = hr1 - hr0 + 1, hc1 - hc0 + 1
+        if h != w: continue
+        if not all(inp[r][c] == 0 for r in range(hr0, hr1 + 1) for c in range(hc0, hc1 + 1)): continue
+        for r in range(hr0, hr1 + 1):
+            for c in range(hc0, hc1 + 1): out[r][c] = 2
+    return out
+
+
+_solve_square_hole_fill = _make_category_solver(_solve_fn_square_hole_fill)
+
+
+def _solve_fn_crosshair_4fold_mirror(inp):
+    """A full-row and full-column of one colour divide the grid into 4 quadrants.
+    One quadrant contains a shape. Output: remove separators, stamp the shape
+    (recoloured to separator colour) into all 4 quadrants with reflections.
+    Task 47c1f68c."""
+    H, W = len(inp), len(inp[0])
+    sr = next((r for r in range(H) if all(inp[r][c] != 0 for c in range(W))), None)
+    sc = next((c for c in range(W) if all(inp[r][c] != 0 for r in range(H))), None)
+    if sr is None or sc is None: return None
+    sep_col = inp[sr][sc]
+    shape = [(r, c) for r in range(H) for c in range(W)
+             if inp[r][c] != 0 and inp[r][c] != sep_col]
+    if not shape: return None
+    OH, OW = H - 1, W - 1
+    out = [[0] * OW for _ in range(OH)]
+    for r, c in shape:
+        di = abs(r - sr); dj = abs(c - sc)
+        for s_r in (-1, 1):
+            for s_c in (-1, 1):
+                ir = sr + s_r * di; ic = sc + s_c * dj
+                if not (0 <= ir < H and 0 <= ic < W): continue
+                or_ = ir if ir < sr else ir - 1
+                oc  = ic if ic < sc else ic - 1
+                if 0 <= or_ < OH and 0 <= oc < OW:
+                    out[or_][oc] = sep_col
+    return out
+
+
+_solve_crosshair_4fold_mirror = _make_category_solver(_solve_fn_crosshair_4fold_mirror)
+
+
+def _solve_fn_repair_periodic_tile(inp):
+    """Grid is a repeating tile pattern with rectangular 0-patches masking some cells.
+    Find the minimal (rp×cp) tile consistent with all non-zero cells, then fill the grid.
+    Task 484b58aa."""
+    H, W = len(inp), len(inp[0])
+    nz = [(r, c, inp[r][c]) for r in range(H) for c in range(W) if inp[r][c] != 0]
+    for rp in range(1, H + 1):
+        for cp in range(1, W + 1):
+            tile = [[0] * cp for _ in range(rp)]
+            ok = True
+            for r, c, v in nz:
+                tr, tc = r % rp, c % cp
+                if tile[tr][tc] == 0:
+                    tile[tr][tc] = v
+                elif tile[tr][tc] != v:
+                    ok = False; break
+            if ok and all(tile[r][c] != 0 for r in range(rp) for c in range(cp)):
+                return [[tile[r % rp][c % cp] for c in range(W)] for r in range(H)]
+    return None
+
+
+_solve_repair_periodic_tile = _make_category_solver(_solve_fn_repair_periodic_tile)
+
+
+def _solve_fn_marker_select_shape(inp):
+    """Input contains several scattered shapes (same non-zero colour) plus a single cell
+    of colour 5. The 5 is 8-adjacent to exactly one 8-connected shape cluster.
+    Output is that cluster's bounding box. Task 48d8fb45."""
+    H, W = len(inp), len(inp[0])
+    five = next(((r, c) for r in range(H) for c in range(W) if inp[r][c] == 5), None)
+    if five is None: return None
+    mr, mc = five
+    nz = {(r, c) for r in range(H) for c in range(W) if inp[r][c] not in (0, 5)}
+    visited = set(); comps = []
+    for start in nz:
+        if start in visited: continue
+        comp = []; q = [start]; inq = {start}
+        while q:
+            cur = q.pop(); visited.add(cur); comp.append(cur)
+            r, c = cur
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0: continue
+                    nb = (r + dr, c + dc)
+                    if nb in nz and nb not in visited and nb not in inq:
+                        q.append(nb); inq.add(nb)
+        comps.append(comp)
+    marked = None
+    for comp in comps:
+        cs = set(comp)
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if (mr + dr, mc + dc) in cs:
+                    marked = comp; break
+            if marked: break
+        if marked: break
+    if not marked: return None
+    rs = [r for r, c in marked]; cs = [c for r, c in marked]
+    r0, r1, c0, c1 = min(rs), max(rs), min(cs), max(cs)
+    out = [[0] * (c1 - c0 + 1) for _ in range(r1 - r0 + 1)]
+    for r, c in marked: out[r - r0][c - c0] = inp[r][c]
+    return out
+
+
+_solve_marker_select_shape = _make_category_solver(_solve_fn_marker_select_shape)
+
+
+def _solve_fn_decorate_shape_by_2_orientation(inp):
+    """One complete 4-skeleton (colours 1,2,3,4) is the template. Each incomplete
+    skeleton (colours 2,4 only) gets the same decoration (1s and 3s) under the D4
+    transform that maps the template's 2-position to the incomplete's 2-position."""
+    H, W = len(inp), len(inp[0])
+    cell_set = {(r, c) for r in range(H) for c in range(W) if inp[r][c] != 0}
+    visited: set = set()
+    comps = []
+    for start in sorted(cell_set):
+        if start in visited:
+            continue
+        comp: list = []
+        queue = [start]
+        in_q = {start}
+        while queue:
+            cur = queue.pop()
+            visited.add(cur)
+            comp.append(cur)
+            r, c = cur
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nb = (r + dr, c + dc)
+                if nb in cell_set and nb not in visited and nb not in in_q:
+                    queue.append(nb)
+                    in_q.add(nb)
+        comps.append(comp)
+    d4: list = [
+        lambda r, c: ( r,  c),   # identity
+        lambda r, c: ( c, -r),   # rot90cw
+        lambda r, c: (-r, -c),   # rot180
+        lambda r, c: (-c,  r),   # rot270cw
+        lambda r, c: ( r, -c),   # hflip
+        lambda r, c: (-r,  c),   # vflip
+        lambda r, c: ( c,  r),   # transpose
+        lambda r, c: (-c, -r),   # antitranspose
+    ]
+    template = None
+    incompletes = []
+    for comp in comps:
+        colours = {inp[r][c] for r, c in comp}
+        if 1 in colours and 3 in colours:
+            template = comp
+        elif colours <= {2, 4}:
+            incompletes.append(comp)
+    if template is None or not incompletes:
+        return None
+
+    def ctr(cells):
+        return sum(r for r, c in cells) / len(cells), sum(c for r, c in cells) / len(cells)
+
+    def norm(cells, ct):
+        return frozenset((round(r - ct[0]), round(c - ct[1])) for r, c in cells)
+
+    tmpl_4 = [(r, c) for r, c in template if inp[r][c] == 4]
+    tmpl_2 = next((r, c) for r, c in template if inp[r][c] == 2)
+    tmpl_1_offs = [(round(r - ctr(tmpl_4)[0]), round(c - ctr(tmpl_4)[1]))
+                   for r, c in template if inp[r][c] == 1]
+    tmpl_3_offs = [(round(r - ctr(tmpl_4)[0]), round(c - ctr(tmpl_4)[1]))
+                   for r, c in template if inp[r][c] == 3]
+    ct_t = ctr(tmpl_4)
+    tmpl_4_norm = norm(tmpl_4, ct_t)
+    tmpl_2_off = (round(tmpl_2[0] - ct_t[0]), round(tmpl_2[1] - ct_t[1]))
+    out = [list(row) for row in inp]
+    for inc in incompletes:
+        inc_4 = [(r, c) for r, c in inc if inp[r][c] == 4]
+        inc_2 = next((r, c) for r, c in inc if inp[r][c] == 2)
+        ct_i = ctr(inc_4)
+        inc_4_norm = norm(inc_4, ct_i)
+        inc_2_off = (round(inc_2[0] - ct_i[0]), round(inc_2[1] - ct_i[1]))
+        T_fn = None
+        for T in d4:
+            if frozenset(T(r, c) for r, c in tmpl_4_norm) == inc_4_norm:
+                if T(*tmpl_2_off) == inc_2_off:
+                    T_fn = T
+                    break
+        if T_fn is None:
+            return None
+        for offs, col in [(tmpl_1_offs, 1), (tmpl_3_offs, 3)]:
+            for dr, dc in offs:
+                tr, tc = T_fn(dr, dc)
+                nr, nc = round(ct_i[0] + tr), round(ct_i[1] + tc)
+                if 0 <= nr < H and 0 <= nc < W:
+                    out[nr][nc] = col
+    return out
+
+
+_solve_decorate_shape_by_2_orientation = _make_category_solver(
+    _solve_fn_decorate_shape_by_2_orientation
+)
+
+
 def _always(d): return True  # noqa: E731  — permissive pre-filter; verify() is the gate
 
 
@@ -3093,6 +3780,23 @@ ALL_PRIMITIVES = [
     ("MOST_FREQUENT_SHAPE",           _always, _solve_most_frequent_shape),
     ("L_SHAPE_COMPLETE",              _always, _solve_l_shape_complete),
     ("MIRROR_TILE_2X2",               _always, _solve_mirror_tile_2x2),
+    ("ANTIDIAG_PLUS_FLOOR",           _always, _solve_antidiag_plus_floor),
+    ("COMB_MIDDLE_ROW",               _always, _solve_comb_middle_row),
+    ("FRAME_EXPAND_SWAP",             _always, _solve_frame_expand_swap),
+    ("CORNER_FRAME_EXTRACT",          _always, _solve_corner_frame_extract),
+    ("STAMP_COLOUR_ENCODED_FLIP",     _always, _solve_stamp_colour_encoded_flip),
+    ("LARGEST_ZERO_RECT",             _always, _solve_largest_zero_rect),
+    ("FRAME_CROP_5",                  _always, _solve_frame_crop_5),
+    ("GRAVITY_TO_5BLOCK",             _always, _solve_gravity_to_5block),
+    ("FRAME_CROSSHAIR",               _always, _solve_frame_crosshair),
+    ("REMOVE_ISOLATED_SINGLETONS",    _always, _solve_remove_isolated_singletons),
+    ("HOLLOW_RECTANGLES",             _always, _solve_hollow_rectangles),
+    ("FRAME_GAP_FILL",                _always, _solve_frame_gap_fill),
+    ("SQUARE_HOLE_FILL",              _always, _solve_square_hole_fill),
+    ("CROSSHAIR_4FOLD_MIRROR",        _always, _solve_crosshair_4fold_mirror),
+    ("REPAIR_PERIODIC_TILE",          _always, _solve_repair_periodic_tile),
+    ("MARKER_SELECT_SHAPE",           _always, _solve_marker_select_shape),
+    ("DECORATE_SHAPE_BY_2_ORIENT",    _always, _solve_decorate_shape_by_2_orientation),
     ("PATH_THROUGH_WALLS",            _always, _solve_path_through_walls),
 ]
 

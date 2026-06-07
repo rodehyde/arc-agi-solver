@@ -462,3 +462,16 @@ Tasks: `469497ad`, `007bbfb7`
 **Example (pair 0):** All shapes are straight horizontal/vertical bars of length 5. 2 is always at one end, one step to the side. The decoration rule: 1s at odd distances from the 2 on the 2-side; 3s at even distances on the opposite side. Rotating the bar direction 90°/180°/270° gives the right decorations for each incomplete shape.
 
 **Coverage note:** Rule verified verbally across all 3 pairs. Solver NOT implemented — needs D4 transform logic plus shape-skeleton extraction (handles bars, L-shapes, plus-shapes). Estimated ~80 lines. Medium implementation complexity.
+
+---
+
+## `4290ef0e` — NESTED_FRAME_ASSEMBLY (coverage = 1)
+
+**Step 1:** Input contains multiple colored shapes, each forming a partial rectangular "corner-cluster" pattern. One color may appear as a single isolated cell (the center marker).
+**Step 2:** The shapes are scattered around the input with no clear spatial relationship. Each shape is a partial frame showing corner clusters and/or edge segments.
+**Step 3:** The shapes, when ordered by bounding box size, form concentric rings of a nested symmetric (D4) frame. The output is assembled by placing each shape's corner pattern into the appropriate ring, from largest (outermost) to smallest (innermost), with the isolated single cell (if any) as the center.
+**Step 4:** (1) Extract each colored shape's bounding box size. (2) Sort shapes by area, largest first. (3) Extract the "corner cluster" pattern from each shape (top-left quarter, then mirror 4-fold). (4) Build output grid starting with the largest shape's bounding box; place each ring concentrically inward.
+
+**Example (pair 0):** 3 shapes: 6-shape (7×7), 1-shape (5×5), 3-shape (3×3). Output 7×7 has 6-ring (corners), 1-ring (inner L-clusters), 3-ring (center 3×3 area).
+
+**Coverage note:** Rule verified verbally. Solver NOT implemented — complex to build correctly (corner-cluster extraction, 4-fold symmetry reconstruction, ring placement). The CENTER cell (if present) fills the very center. High implementation complexity (~100+ lines). Confidence HIGH on the rule.

@@ -1,5 +1,5 @@
 # CLAUDE.md
-*Last updated: 2026-06-06*
+*Last updated: 2026-06-08*
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -25,9 +25,9 @@ This is not a failure — it reflects the nature of ARC. The tasks are deliberat
 
 ### Current state
 
-Platform is set up: VS Code + Claude Code on macOS, Python environment, GitHub repo, ARC training/evaluation data loaded. 400 training tasks; ~100 currently solved by rule-based solvers (as of 2026-06-06).
+Platform is set up: VS Code + Claude Code on macOS, Python environment, GitHub repo, ARC training/evaluation data loaded. ~141 of 400 original ARC training tasks solved by rule-based solvers; 9/10 solved on a blind sample of evaluation tasks (as of 2026-06-08). Now working through ARC 2025 training tasks.
 
-**Active approach:** Work through unsolved training tasks one at a time using the triage process. For each task, the primary question is not "can I make this pass?" but "what is the rule, and can I derive it from first principles using the process?" If stuck after one revision attempt, stop and ask the user immediately — do not stall alone.
+**Active approach:** Work through ARC 2025 training tasks one at a time using the triage process. For each task, the primary question is not "can I make this pass?" but "what is the rule, and can I derive it from first principles using the process?" If stuck after one revision attempt, stop and ask the user immediately — do not stall alone.
 
 The primary output is a growing library of task-level solvers registered in `scripts/solvers.py`. Where sub-operations recur across solvers, extract them as shared primitives. But do not force generalisation — a solver that correctly handles one task is better than an abstraction that handles none well.
 
@@ -46,7 +46,7 @@ For each task:
 
 1. **Pattern match** — Scan the recurring structural patterns list first. If the task matches a named family, skip straight to implementation.
 2. **Decompose** — If no pattern match, apply the 7 decomposition lenses (see below).
-3. **Verbal 4-step** — Apply the protocol in text. If no hypothesis emerges, stop and ask the user immediately.
+3. **Verbal 4-step** — Write out all four steps as visible text in your response before any code appears: Step 1 answer, Step 2 answer, Step 3 rule, Step 4 one-sentence rule. If the output is not written in the response, it has not been done. If no hypothesis emerges, stop and ask the user immediately.
 4. **Solver + verification** — Write `solve(inp)`, run against all training pairs.
 5. **Decision:**
    - All pairs match → write module, register in `ALL_PRIMITIVES`, move on.
@@ -139,7 +139,7 @@ When analysing an unknown task or bucket of tasks, run these steps **in order** 
 
 If steps 1–4 fail to yield a hypothesis, stop and ask the user immediately.
 
-**Before coding, predict pair 2 from the rule derived from pair 0.** State what pair 2's output should look like under the hypothesis, then check it against the actual output. If it doesn't match exactly — including the turn point, endpoint, colour, and extent — the rule is incomplete. Do not proceed to code until the prediction matches. A rule that fits pair 0 but cannot predict pair 2 is an observation, not a rule.
+**Before coding, predict pair 2 from the rule derived from pair 0.** Write this prediction as text in your response before any code appears. State what pair 2's output should look like under the hypothesis, then check it against the actual output. If you cannot write the prediction down, you do not have a rule yet. If it doesn't match exactly — including the turn point, endpoint, colour, and extent — the rule is incomplete. Do not proceed to code until the prediction matches. A rule that fits pair 0 but cannot predict pair 2 is an observation, not a rule.
 
 **Verification is mandatory before claiming HIGH confidence.** A rule described in words is a hypothesis. It only becomes HIGH confidence when a Python implementation produces zero mismatches across all training pairs. Write the solver inline, run it, and report the per-pair match results. If any pair fails, revise the rule — do not report HIGH confidence on a partial match. MEDIUM confidence means the rule has not been code-verified or has known gaps.
 
@@ -192,7 +192,7 @@ python src/explore.py --split re_arc
 The project is structured as a pipeline: **load → categorise → (solve) → visualise**.
 
 ### Data
-Raw ARC tasks live in `data/training/` and `data/evaluation/` as JSON files named by task ID (e.g. `007bbfb7.json`). Each file has `train` (list of `{input, output}` pairs) and `test` (list of `{input}` dicts). `src/loader.py` attaches `task_id` from the filename when loading.
+Raw ARC tasks live in `data/training/` and `data/evaluation/` (original ARC-AGI, 400 tasks each) and `data/arc2025_training/` (ARC 2025 competition tasks), as JSON files named by task ID (e.g. `007bbfb7.json`). Each file has `train` (list of `{input, output}` pairs) and `test` (list of `{input}` dicts). `src/loader.py` attaches `task_id` from the filename when loading.
 
 ### Categorisation (`src/categories/`)
 `size_features.py` contains all category logic. `categorise_task(task)` returns a list of matching category labels for a task — a task can belong to multiple categories. Categories are defined by inspecting training pairs only (never the test pair). Current categories are size/area-based; the intent is to grow this into a richer taxonomy to route tasks to specialised solvers.

@@ -1,0 +1,15 @@
+- [ARC-AGI project goal](project_goal.md) — Mimic human pattern recognition for ARC puzzles; 3-stage roadmap: categorise → solve per category → merge
+- [Current project state](current_state.md) — ~86/400 solved (2026-06-05); batch triage with 7-lens decomposition; 09629e4f on backlog
+- [TTT implementation](ttt_implementation.md) — Batch 8, cosine decay, save-best; default 200 steps; eval command ready
+- [Rule-based solver coverage](rule_based_coverage.md) — 68/400 solved; GEOMETRIC_TRANSFORM 15, LOGICAL_OP 10, COLOUR_REMAP 6, TILE_FILL 4; 73 tests passing
+- [Neural training diagnosis](neural_training_diagnosis.md) — arc_exact=0.000 was mixed clusters + missing --val-arc-task-ids; fix: coherent cluster + set that flag; 6d0160f0 reached 96.3% cell_acc
+- [ML architecture (current)](architecture.md) — Decoder-only transformer, in-context learning, same model for all clusters — merge by retraining on union
+- [Structured description format](structured_descriptions.md) — 5-field template with controlled vocabulary; replaced free-prose; gives perfect cluster separation on Cluster 9
+- [Scene-first descriptions (new)](scene_first_descriptions.md) — Replaces controlled-vocab approach; scene-first prompting, free-form TYPE field, questions apparent randomness; output to data/descriptions_scene.json
+- [Sub-cluster browsing observations](browsing_observations.md) — User's task-by-task notes on multi-stage-rule sub-clusters 0 and 1; key finding: both contain same two families (line-extension + rectangle)
+- [Geometric TTA (DONE)](geometric_tta_todo.md) — D4 TTA implemented in evaluate.py; --n-d4 flag; 8×20=160 votes default
+- [nanoGPT fine-tuning — ABANDONED](nanogpt_finetune.md) — GPT-2 too small for ARC rule learning; pivoted back to transformer
+- [Don't repeat conclusions](feedback_no_repeated_conclusions.md) — State each rule/category once; don't restate it across multiple sections of the same analysis
+- [Triage pace feedback](feedback_triage_pace.md) — ~1 min per task; stop and ask user immediately if stuck; no autonomous batches leaving user uninformed >1 min
+- [Don't ask permission for local work](feedback_stop_asking_permission.md) — Never ask "shall I proceed?" for local ops; just move to the next task
+- [Exhaust hypothesis variants before discarding](feedback_exhaust_hypothesis_variants.md) — One failed symmetry/size/etc. variant ≠ whole hypothesis family fails; test all sub-variants first

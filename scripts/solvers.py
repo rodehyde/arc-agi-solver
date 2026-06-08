@@ -66,6 +66,17 @@ from src.categories.logical_ops import solve_logical_op
 from src.categories.colour_remap import solve_colour_remap
 from src.categories.quadrant_mirror import solve_quadrant_mirror
 from src.categories.tiling import solve_tile_fill
+from src.categories.lr_column_symmetrise import solve as solve_lr_column_symmetrise
+from src.categories.v_shadow_lines import solve as solve_v_shadow_lines
+from src.categories.cross_arm_pointer import solve as solve_cross_arm_pointer
+from src.categories.peg_slide_to_gap import solve as solve_peg_slide_to_gap
+from src.categories.comb_slide_to_edge import solve as solve_comb_slide_to_edge
+from src.categories.matrix_block_expand import solve as solve_matrix_block_expand
+from src.categories.rect_crosshair import solve as solve_rect_crosshair
+from src.categories.sep_grid_uniform_extract import solve as solve_sep_grid_uniform_extract
+from src.categories.seg_rotate_swap import solve as solve_seg_rotate_swap
+from src.categories.append_lr_mirror import solve as solve_append_lr_mirror
+from src.categories.bbox_crop import solve as solve_bbox_crop
 
 TRAINING_DIR = Path(__file__).parent.parent / "data" / "training"
 
@@ -918,6 +929,17 @@ _solve_geometric_transform      = _make_task_solver(solve_geometric_transform)
 _solve_logical_op               = _make_task_solver(solve_logical_op)
 _solve_colour_remap             = _make_task_solver(solve_colour_remap)
 _solve_tile_fill                = _make_category_solver(solve_tile_fill)
+_solve_lr_column_symmetrise     = _make_category_solver(solve_lr_column_symmetrise)
+_solve_v_shadow_lines           = _make_category_solver(solve_v_shadow_lines)
+_solve_cross_arm_pointer        = _make_category_solver(solve_cross_arm_pointer)
+_solve_peg_slide_to_gap         = _make_category_solver(solve_peg_slide_to_gap)
+_solve_comb_slide_to_edge       = _make_category_solver(solve_comb_slide_to_edge)
+_solve_matrix_block_expand      = _make_category_solver(solve_matrix_block_expand)
+_solve_rect_crosshair           = _make_category_solver(solve_rect_crosshair)
+_solve_sep_grid_uniform_extract = _make_category_solver(solve_sep_grid_uniform_extract)
+_solve_seg_rotate_swap          = _make_category_solver(solve_seg_rotate_swap)
+_solve_append_lr_mirror         = _make_category_solver(solve_append_lr_mirror)
+_solve_bbox_crop                = _make_category_solver(solve_bbox_crop)
 
 
 # ── Batch-1 task-specific solvers ─────────────────────────────────────────────
@@ -4058,6 +4080,17 @@ ALL_PRIMITIVES = [
     ("GEOMETRIC_TRANSFORM",           _always, _solve_geometric_transform),
     ("COLOUR_REMAP",                  _always, _solve_colour_remap),
     ("TILE_FILL",                     _always, _solve_tile_fill),
+    ("LR_COLUMN_SYMMETRISE",          _always, _solve_lr_column_symmetrise),
+    ("V_SHADOW_LINES",                _always, _solve_v_shadow_lines),
+    ("CROSS_ARM_POINTER",            _always, _solve_cross_arm_pointer),
+    ("PEG_SLIDE_TO_GAP",             _always, _solve_peg_slide_to_gap),
+    ("COMB_SLIDE_TO_EDGE",           _always, _solve_comb_slide_to_edge),
+    ("MATRIX_BLOCK_EXPAND",          _always, _solve_matrix_block_expand),
+    ("RECT_CROSSHAIR",               _always, _solve_rect_crosshair),
+    ("SEP_GRID_UNIFORM_EXTRACT",     _always, _solve_sep_grid_uniform_extract),
+    ("SEG_ROTATE_SWAP",              _always, _solve_seg_rotate_swap),
+    ("APPEND_LR_MIRROR",             _always, _solve_append_lr_mirror),
+    ("BBOX_CROP",                    _always, _solve_bbox_crop),
     # ── batch-1 task-specific solvers ──
     ("DIAGONAL_TILE",                 _always, _solve_diagonal_tile),
     ("REPEATING_STRIPES",             _always, _solve_repeating_stripes),

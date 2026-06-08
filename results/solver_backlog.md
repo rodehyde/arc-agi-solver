@@ -475,3 +475,23 @@ Tasks: `469497ad`, `007bbfb7`
 **Example (pair 0):** 3 shapes: 6-shape (7×7), 1-shape (5×5), 3-shape (3×3). Output 7×7 has 6-ring (corners), 1-ring (inner L-clusters), 3-ring (center 3×3 area).
 
 **Coverage note:** Rule verified verbally. Solver NOT implemented — complex to build correctly (corner-cluster extraction, 4-fold symmetry reconstruction, ring placement). The CENTER cell (if present) fills the very center. High implementation complexity (~100+ lines). Confidence HIGH on the rule.
+
+---
+
+## `212895b5` — BLOCK_CORNER_RAYS (evaluation set, closeness=1)
+
+**Step 1:** Large grid of 0s with a 3×3 block of 8s and many scattered 5s.  
+**Step 2:** Nothing anomalous in input structure — 5s are isolated markers.  
+**Step 3 (partial):** The output adds 2s and 4s. The 2s form diagonal rays from each corner of the 3×3 block (NW from TL, NE from TR, SW from BL, SE from BR). Each ray continues until hitting a 5 (stops at the cell just before the 5) or the grid boundary. The 4s form orthogonal arm patterns from the block edges, but the exact 4-rule is unclear.
+
+**4-ray rule (verified pair 1 and pair 2 cleanly):** From each block corner, shoot a diagonal ray one step at a time. Place a 2 at each cell until the next step would land on a 5, or the grid boundary is reached.
+
+**4-arm rule (NOT yet understood):**  
+- In pair 1 the horizontal arms from the block middle row are 1 cell each side (stopping before adjacent 5s).  
+- The upper-right 4-cluster (pair 1) forms an alternating wide/narrow diagonal pattern toward the NE-direction 5 group.  
+- Pattern: 4s appear 1–3 cols to the "inside" of the NE 2-ray position at each row — alternating single cell and 3-cell-wide strips.  
+- Pair 0 anomaly: TL 2-ray stops 3 cells from the block corner instead of 6 cells (expected 5 cells before the boundary 5). Possibly blocked by cluster of adjacent 5s at rows 1-3.  
+
+**Step 4 (partial):** For each block corner, shoot a diagonal ray outward placing 2s until a 5 or grid edge is hit. Then apply a 4-arm rule from each block face center (orthogonal extension until a 5 or grid edge). The 4 rule involves the 3-unit width of the block projecting outward, creating alternating single and triple-wide bands — but the precise rule is unclear.
+
+**Coverage note:** 2-ray rule coded mentally but NOT registered. 4-arm rule NOT understood. Needs more analysis.

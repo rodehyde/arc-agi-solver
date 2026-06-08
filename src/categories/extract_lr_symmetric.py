@@ -1,79 +1,67 @@
 """
-EXTRACT_LR_SYMMETRIC (d56f2372 eval)
+EXTRACT_LR_SYMMETRIC (d56f2372 evaluation)
 
-Multiple coloured shapes appear in the input; exactly one is left-right
-symmetric. Output = that shape, cropped to its bounding box.
+Input: a large grid containing several colored shapes (one color per shape).
+
+Rule: find the unique shape whose bounding box is left-right symmetric
+(every row reads the same forwards and backwards); output that bounding box.
+
+Detection: exactly one color's bounding-box sub-grid is LR-symmetric;
+prediction matches all training pairs.
 """
 
 from collections import defaultdict
 
 
-def _bfs4(grid, sr, sc):
-    rows, cols = len(grid), len(grid[0])
-    val = grid[sr][sc]
-    visited = {(sr, sc)}
-    queue = [(sr, sc)]
-    while queue:
-        r, c = queue.pop(0)
-        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            nr, nc = r + dr, c + dc
-            if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited and grid[nr][nc] == val:
-                visited.add((nr, nc))
-                queue.append((nr, nc))
-    return visited
+def _get_shapes(grid):
+    H, W = len(grid), len(grid[0])
+    colors = defaultdict(list)
+    for r in range(H):
+        for c in range(W):
+            if grid[r][c] != 0:
+                colors[grid[r][c]].append((r, c))
+    shapes = {}
+    for color, cells in colors.items():
+        rs = [r for r, c in cells]
+        cs = [c for r, c in cells]
+        r1, r2, c1, c2 = min(rs), max(rs), min(cs), max(cs)
+        sub = [
+            [grid[r][c] if grid[r][c] == color else 0
+             for c in range(c1, c2 + 1)]
+            for r in range(r1, r2 + 1)
+        ]
+        shapes[color] = sub
+    return shapes
 
 
-def _crop(cells, colour):
-    rs = [r for r, c in cells]
-    cs = [c for r, c in cells]
-    r0, r1 = min(rs), max(rs)
-    c0, c1 = min(cs), max(cs)
-    g = [[0] * (c1 - c0 + 1) for _ in range(r1 - r0 + 1)]
-    for r, c in cells:
-        g[r - r0][c - c0] = colour
-    return g
+def _is_lr_symmetric(sub):
+    return all(row == row[::-1] for row in sub)
 
 
-def _is_lr_symmetric(grid):
-    return all(row == list(reversed(row)) for row in grid)
+def _predict(inp):
+    shapes = _get_shapes(inp)
+    lr_syms = [(color, sub) for color, sub in shapes.items()
+               if _is_lr_symmetric(sub)]
+    if len(lr_syms) != 1:
+        return None
+    return lr_syms[0][1]
 
 
 def detect(task):
     pairs = task["train"]
-    if len(pairs) < 2:
+    if not pairs:
         return False
     for pair in pairs:
-        inp = pair["input"]
-        rows, cols = len(inp), len(inp[0])
-        seen = set()
-        by_colour = defaultdict(set)
-        for r in range(rows):
-            for c in range(cols):
-                if inp[r][c] != 0 and (r, c) not in seen:
-                    cells = _bfs4(inp, r, c)
-                    seen |= cells
-                    by_colour[inp[r][c]] |= cells
-        symmetric = [col for col, cells in by_colour.items() if _is_lr_symmetric(_crop(cells, col))]
-        if len(symmetric) != 1:
+        inp, out = pair["input"], pair["output"]
+        predicted = _predict(inp)
+        if predicted is None or predicted != out:
             return False
     return True
 
 
 def solve(inp):
-    rows, cols = len(inp), len(inp[0])
-    seen = set()
-    by_colour = defaultdict(set)
-    for r in range(rows):
-        for c in range(cols):
-            if inp[r][c] != 0 and (r, c) not in seen:
-                cells = _bfs4(inp, r, c)
-                seen |= cells
-                by_colour[inp[r][c]] |= cells
-    for colour, cells in sorted(by_colour.items()):
-        g = _crop(cells, colour)
-        if _is_lr_symmetric(g):
-            return g
-    return None
+    result = _predict(inp)
+    return result if result is not None else [list(row) for row in inp]
 
 
 def categorise(task):

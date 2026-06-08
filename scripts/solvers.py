@@ -4043,6 +4043,78 @@ def _solve_fn_recolour_by_hole_count(inp):
 _solve_recolour_by_hole_count = _make_category_solver(_solve_fn_recolour_by_hole_count)
 
 
+def _solve_fn_t_pointer_stack(inp):
+    """4c177718: separator row of 5s; legend has colors 1, 2 (T-pointer), and shape3;
+    query section has a color-1 shape; T bar direction determines whether shape3
+    goes above or below the query in the output."""
+    from collections import defaultdict
+
+    def _get_sep(g):
+        W = len(g[0])
+        for r in range(len(g)):
+            if all(g[r][c] == 5 for c in range(W)):
+                return r
+        return None
+
+    def _shapes(g, r0, r1):
+        cells = defaultdict(list)
+        for r in range(r0, r1):
+            for c in range(len(g[r])):
+                v = g[r][c]
+                if v not in (0, 5):
+                    cells[v].append((r - r0, c))
+        return dict(cells)
+
+    def _sub(cells, color):
+        rs = [r for r, c in cells]; cs = [c for r, c in cells]
+        r1, r2, c1, c2 = min(rs), max(rs), min(cs), max(cs)
+        g = [[0] * (c2 - c1 + 1) for _ in range(r2 - r1 + 1)]
+        for r, c in cells:
+            g[r - r1][c - c1] = color
+        return g, r1, r2, c1, c2
+
+    H, W = len(inp), len(inp[0])
+    sep = _get_sep(inp)
+    if sep is None:
+        return None
+    legend = _shapes(inp, 0, sep)
+    lower = _shapes(inp, sep + 1, H)
+    if 2 not in legend or 1 not in legend or 1 not in lower:
+        return None
+
+    c2_cells = legend[2]
+    rows_of_2 = defaultdict(list)
+    for r, c in c2_cells:
+        rows_of_2[r].append(c)
+    bar_row = max(rows_of_2, key=lambda r: len(rows_of_2[r]))
+    max_r2 = max(r for r, c in c2_cells)
+    shape3_above = (bar_row == max_r2)
+
+    s3_colors = [c for c in legend if c not in (1, 2)]
+    if len(s3_colors) != 1:
+        return None
+    s3c = s3_colors[0]
+    s3_grid, _, _, _, _ = _sub(legend[s3c], s3c)
+
+    q_cells = lower[1]
+    q_grid, r1q, r2q, c1q, c2q = _sub(q_cells, 1)
+
+    out_H = H - sep - 1
+    out = [[0] * W for _ in range(out_H)]
+    for r in range(len(q_grid)):
+        for c in range(len(q_grid[0])):
+            out[r1q + r][c1q + c] = q_grid[r][c]
+
+    s3_r = (r1q - len(s3_grid)) if shape3_above else (r2q + 1)
+    for r in range(len(s3_grid)):
+        for c in range(len(s3_grid[0])):
+            out[s3_r + r][c1q + c] = s3_grid[r][c]
+    return out
+
+
+_solve_t_pointer_stack = _make_category_solver(_solve_fn_t_pointer_stack)
+
+
 # ── Primitive registry ────────────────────────────────────────────────────────
 #
 # Order matters: more specific solvers should come first.
@@ -4168,6 +4240,7 @@ ALL_PRIMITIVES = [
     ("RECOLOUR_BY_HOLE_COUNT",        _always, _solve_recolour_by_hole_count),
     ("DECORATE_SHAPE_BY_2_ORIENT",    _always, _solve_decorate_shape_by_2_orientation),
     ("PATH_THROUGH_WALLS",            _always, _solve_path_through_walls),
+    ("T_POINTER_STACK",               _always, _solve_t_pointer_stack),
 ]
 
 

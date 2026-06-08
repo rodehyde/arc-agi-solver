@@ -1,5 +1,5 @@
 # CLAUDE.md
-*Last updated: 2026-06-08*
+*Last updated: 2026-06-09*
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -50,12 +50,16 @@ For each task:
 4. **Solver + verification** — Write `solve(inp)`, run against all training pairs.
 5. **Decision:**
    - All pairs match → write module, register in `ALL_PRIMITIVES`, move on.
-   - Some pairs fail → make one revision attempt. If still failing, stop and ask the user immediately.
-   - No hypothesis after pattern match + decomposition + 4-step → stop and ask the user immediately.
+   - Some pairs fail → make one revision attempt. If still failing, stop and ask the user immediately. Report: which lenses fired, current partial rule, which pair fails and what the discrepancy is.
+   - No hypothesis after pattern match + decomposition + 4-step → stop and ask the user immediately. Report: which lenses fired, what the input structure looks like, and the specific feature you cannot explain.
 
 **No conclusion without process.** Before stating a rule or pattern, identify which step of the triage cycle produced it. If you can't, you've skipped the process — go back and run it. A confident-sounding answer reached by implicit pattern matching is not a conclusion; it's a hypothesis that hasn't been examined.
 
-**Time limit: ~1 minute per task.** If the rule isn't clear within that window, bring the user in rather than stalling. The user is a faster pattern-recogniser for novel tasks and should not be kept waiting.
+**Time limits differ between training and evaluation modes.**
+
+*Training mode* — stop at ~1 minute per task and bring the user in. When you do, report in full: which lenses fired, the partial rule reached so far, the specific pair or feature causing the stall, and any hypothesis variants already ruled out. The user is a faster pattern-recogniser for novel tasks and should not be kept waiting with a vague "I'm stuck".
+
+*Evaluation mode* — use a time-budget approach. Compute per-task budget = total time allowed ÷ number of tasks. On the initial pass, move on when a task exceeds its budget. When interrupted, record a **closeness score**: 0 = no hypothesis, 1 = hypothesis but no code, 2 = code written but pairs fail, 3 = all but one pair pass. After the initial pass, spend any remaining time on tasks ordered by closeness score (highest first), favouring those one step from completion.
 
 **Do not reach for a mathematical toolkit before the data has suggested it.** When a task has structure (symmetry, periodicity, a group action), that structure will be *visible in the pairs* — you will see it before you name it. The right order is: (1) read the pairs, (2) ask "what is this grid almost?", (3) notice the structure concretely (e.g. "row r and column r seem to mirror each other"), (4) only then identify the mathematical abstraction that names what you observed (e.g. "that is transposition symmetry"). Running this in reverse — starting from a pre-formed toolkit of transforms (D4 group, symmetry families, rotation matrices) and testing each one — is a search strategy that can take minutes and may still miss the answer. It also bypasses the user, who can often see the structure in seconds. If you find yourself iterating through abstract cases without a concrete observation from the data anchoring you, stop immediately and ask the user.
 
@@ -103,6 +107,10 @@ These patterns appear across dozens of tasks. Recognising the structure immediat
 
 **Input encodes its own output size via a border legend.** If the input contains a marginal annotation — an L-shaped border, a full edge row/column, or a corner region — whose colours or segment counts vary across training pairs while the core content stays the same, that annotation is a scale key. Count the distinct colours (or segments) in the annotation to derive the expansion factor; the first two training pairs together establish the mapping. Task 469497ad exemplifies this: the right column and bottom row form an L-border whose distinct-colour count equals (scale − 1), and the output is the full input scaled by that factor with diagonal marker rays added.
 
+**Bounding box crop (BBOX_CROP).** If the output is smaller than the input and contains exactly the non-zero content of the input with no zero padding, the rule is crop to the bounding box of all non-zero cells. Detect by checking that output dimensions match the non-zero bounding box of the input.
+
+**Mirror-and-append (APPEND_LR_MIRROR / APPEND_UD_MIRROR).** If the output width is exactly 2× the input width and the right half of every row is the left half reversed, the rule is append the left-right mirror. Similarly, if the output height is 2× input height and the bottom half mirrors the top, it's append the upward mirror. Check width ratio first — it's the most common variant.
+
 ## Decomposition pre-step
 
 Before running the 4-step protocol, apply these 7 lenses to decompose the input. They answer "what kind of problem is this?" and dramatically narrow the hypothesis space.
@@ -125,6 +133,8 @@ When analysing an unknown task or bucket of tasks, run these steps **in order** 
 
 **Before step 1: read the training pairs in order.** If pair 0 looks simpler or more structured than the rest, treat it as a legend — its output defines the tile types, stamps, or tools available for all later pairs. The later pairs are then instances of the same rule applied to different inputs.
 
+**Before step 1: note the output dimensions.** Compare input and output sizes across training pairs. If output size equals input size, the rule preserves the grid (recolour, stamp, repair). If output is strictly smaller, the rule extracts or crops. If output is a fixed size regardless of input, it's a read-off. If output scales proportionally with input, it's an expansion or tiling. This single check immediately rules out roughly half the rule families — do it before step 1.
+
 1. **What is this input ALMOST?**
    Check for near-regularity: almost uniform (a few contaminating cells), almost symmetric (one region breaks it), almost tiled (one tile is wrong or missing), almost identical to another region. If found, the transformation is likely *repair, extract, or complete* the near-regular structure.
 
@@ -139,7 +149,7 @@ When analysing an unknown task or bucket of tasks, run these steps **in order** 
 
 If steps 1–4 fail to yield a hypothesis, stop and ask the user immediately.
 
-**Before coding, predict pair 2 from the rule derived from pair 0.** Write this prediction as text in your response before any code appears. State what pair 2's output should look like under the hypothesis, then check it against the actual output. If you cannot write the prediction down, you do not have a rule yet. If it doesn't match exactly — including the turn point, endpoint, colour, and extent — the rule is incomplete. Do not proceed to code until the prediction matches. A rule that fits pair 0 but cannot predict pair 2 is an observation, not a rule.
+**Before coding, predict the last training pair not yet used to derive the rule.** Write this prediction as text in your response before any code appears. State what that pair's output should look like under the hypothesis, then check it against the actual output. If you cannot write the prediction down, you do not have a rule yet. If it doesn't match exactly — including the turn point, endpoint, colour, and extent — the rule is incomplete. Do not proceed to code until the prediction matches. A rule that fits the earlier pairs but cannot predict the held-out pair is an observation, not a rule.
 
 **Verification is mandatory before claiming HIGH confidence.** A rule described in words is a hypothesis. It only becomes HIGH confidence when a Python implementation produces zero mismatches across all training pairs. Write the solver inline, run it, and report the per-pair match results. If any pair fails, revise the rule — do not report HIGH confidence on a partial match. MEDIUM confidence means the rule has not been code-verified or has known gaps.
 

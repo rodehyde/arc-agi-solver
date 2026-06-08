@@ -31,37 +31,61 @@ Platform is set up: VS Code + Claude Code on macOS, Python environment, GitHub r
 
 The primary output is a growing library of task-level solvers registered in `scripts/solvers.py`. Where sub-operations recur across solvers, extract them as shared primitives. But do not force generalisation — a solver that correctly handles one task is better than an abstraction that handles none well.
 
+### Evaluation tasks: run-and-score only
+
+**Never register a solver derived from an evaluation task.** The evaluation set is our blind test of generalization. If we encode knowledge from it into `ALL_PRIMITIVES`, we corrupt that test — the solver library would no longer represent what the system can do on truly unseen tasks.
+
+When working an evaluation task:
+- Apply the full triage process and derive the rule.
+- Write and run a `solve()` function to verify it.
+- Record **pass or fail only** — do not create a module, do not register in `ALL_PRIMITIVES`, do not add to `src/categories/`.
+- If the rule looks like it may also appear in the training set, note it in `results/solver_backlog.md` as a pattern to look for there.
+
 ### Principles
 - Categories are defined on training pairs only — never the test pair.
 - A task can belong to multiple categories; categories are not mutually exclusive.
 - Start simple; grow complexity only when simpler approaches fail.
-- **Write a solver for every task whose rule can be verified** — but ask first whether the rule is general enough to justify a solver. Coverage of 1 training task is sufficient *if the rule is role-based and likely to recur*. A highly specific rule (e.g. one that only works for one exact grid size and colour) should be noted in the backlog rather than registered, unless it's a clear instance of a broader family.
+- **Write a solver for every training task whose rule can be verified** — but ask first whether the rule is general enough to justify a solver. Coverage of 1 training task is sufficient *if the rule is role-based and likely to recur*. A highly specific rule (e.g. one that only works for one exact grid size and colour) should be noted in the backlog rather than registered, unless it's a clear instance of a broader family.
 - **Build composable primitives.** When implementing a solver, check whether the sub-operations (bounding box, flood fill, line extension, hollow interior, etc.) already exist in `src/loader.py` or a utility module. If a new primitive is needed and likely to recur, extract it to the shared library rather than duplicating code. This keeps new solvers short.
 - **Generalise before you specify.** Before committing to a rule that names a specific colour, count, or position, ask: *does this need to be specific?* Prefer a rule that refers to a role (e.g. "the anchor block", "the unique colour", "the largest region") over one that names a literal value (e.g. "colour 1", "3 blocks", "bottom row"). A role-based rule generalises better to the evaluation set.
 - **Ask "will this fire on an unseen task?"** before registering any solver. If the answer is "only if the task is identical to the training one", the solver is too narrow. Widen the detection condition or move it to the backlog.
 
 ### Task triage cycle
 
+**THE CODE GATE — read this first.**
+You may write code to load and print task data. That is all. Every other piece of code — any code that tests a hypothesis, computes a statistic, measures a distance, or implements any part of a solve() function — is blocked until the verbal 4-step is complete and written in full in your response. There are no exceptions. Pattern-matching quickly and then reaching for code to "confirm" is not following the process — it is skipping it.
+
 For each task:
 
-1. **Pattern match** — Scan the recurring structural patterns list first. If the task matches a named family, skip straight to implementation.
-2. **Decompose** — If no pattern match, apply the 7 decomposition lenses (see below).
-3. **Verbal 4-step** — Write out all four steps as visible text in your response before any code appears: Step 1 answer, Step 2 answer, Step 3 rule, Step 4 one-sentence rule. If the output is not written in the response, it has not been done. If no hypothesis emerges, stop and ask the user immediately.
+1. **Pattern match** — Scan the recurring structural patterns list. If the task matches a named family, state which one and why, then skip to step 4.
+2. **Decompose** — Apply all 7 decomposition lenses (see below). Write one sentence per lens that fired.
+3. **Verbal 4-step — FULL STOP BEFORE CODE.**
+   Write all of the following in your response, in this order, before any hypothesis-testing code:
+   - **Step 1:** What is this input almost? Cite specific cells, colours, or rows from the actual grids.
+   - **Step 2:** What doesn't belong? Name the specific cells or features that are anomalous.
+   - **Step 3:** What rule connects input to output? State it concretely enough that someone could apply it by hand to produce the correct output for pair 0. Reference specific grid values.
+   - **Step 4:** One-sentence rule. If it needs more than one sentence, the abstraction is not complete — go back to Step 3.
+   - **Held-out prediction:** Before writing any code, write out what the last training pair's output should look like under your Step 4 rule. State it in words (e.g. "pair 2 output should have 4s filling rows 5–11, cols 3–10"). Then check it against the actual output. If it does not match, the rule is wrong — revise Steps 3 and 4 before proceeding. Do not write a solve() function for a rule that cannot predict the held-out pair.
+
+   If any of these five items is absent from your response, the process is not complete. Do not proceed.
+
 4. **Solver + verification** — Write `solve(inp)`, run against all training pairs.
 5. **Decision:**
    - All pairs match → write module, register in `ALL_PRIMITIVES`, move on.
-   - Some pairs fail → make one revision attempt. If still failing, stop and ask the user immediately. Report: which lenses fired, current partial rule, which pair fails and what the discrepancy is.
+   - Some pairs fail → make one revision attempt, returning to Step 3 to identify what the rule missed. If still failing, stop and ask the user immediately. Report: which lenses fired, current partial rule, which pair fails and what the discrepancy is.
    - No hypothesis after pattern match + decomposition + 4-step → stop and ask the user immediately. Report: which lenses fired, what the input structure looks like, and the specific feature you cannot explain.
 
-**No conclusion without process.** Before stating a rule or pattern, identify which step of the triage cycle produced it. If you can't, you've skipped the process — go back and run it. A confident-sounding answer reached by implicit pattern matching is not a conclusion; it's a hypothesis that hasn't been examined.
+**No conclusion without process.** Before stating a rule, identify which step produced it. A confident-sounding answer reached by implicit pattern matching is not a conclusion — it is a hypothesis that has not been examined. If you cannot point to the step, you have skipped the process.
+
+**Code does not substitute for reasoning.** Running analysis scripts to identify what changed between input and output is not the same as completing the verbal steps. If you need code to see what changed, you have not read the data carefully enough. Read the printed grids. The verbal steps must come from reading, not from running.
 
 **Time limits differ between training and evaluation modes.**
 
-*Training mode* — stop at ~1 minute per task and bring the user in. When you do, report in full: which lenses fired, the partial rule reached so far, the specific pair or feature causing the stall, and any hypothesis variants already ruled out. The user is a faster pattern-recogniser for novel tasks and should not be kept waiting with a vague "I'm stuck".
+*Training mode* — stop at ~1 minute per task and bring the user in. When you do, report in full: which lenses fired, the partial rule reached so far, the specific pair or feature causing the stall, and any hypothesis variants already ruled out.
 
 *Evaluation mode* — use a time-budget approach. Compute per-task budget = total time allowed ÷ number of tasks. On the initial pass, move on when a task exceeds its budget. When interrupted, record a **closeness score**: 0 = no hypothesis, 1 = hypothesis but no code, 2 = code written but pairs fail, 3 = all but one pair pass. After the initial pass, spend any remaining time on tasks ordered by closeness score (highest first), favouring those one step from completion.
 
-**Do not reach for a mathematical toolkit before the data has suggested it.** When a task has structure (symmetry, periodicity, a group action), that structure will be *visible in the pairs* — you will see it before you name it. The right order is: (1) read the pairs, (2) ask "what is this grid almost?", (3) notice the structure concretely (e.g. "row r and column r seem to mirror each other"), (4) only then identify the mathematical abstraction that names what you observed (e.g. "that is transposition symmetry"). Running this in reverse — starting from a pre-formed toolkit of transforms (D4 group, symmetry families, rotation matrices) and testing each one — is a search strategy that can take minutes and may still miss the answer. It also bypasses the user, who can often see the structure in seconds. If you find yourself iterating through abstract cases without a concrete observation from the data anchoring you, stop immediately and ask the user.
+**Do not reach for a mathematical toolkit before the data has suggested it.** The structure will be visible in the pairs — you will see it before you name it. The right order is: (1) read the pairs, (2) ask "what is this grid almost?", (3) notice the structure concretely, (4) only then name the abstraction. Running this in reverse — starting from a toolkit and testing each option — is a search strategy that takes minutes and bypasses the user, who can often see the structure in seconds. If you find yourself iterating through abstract cases without a concrete observation anchoring you, stop and ask the user.
 
 ### Autonomous operation
 

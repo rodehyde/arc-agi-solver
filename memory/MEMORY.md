@@ -13,3 +13,4 @@
 - [Triage pace feedback](feedback_triage_pace.md) — ~1 min per task; stop and ask user immediately if stuck; no autonomous batches leaving user uninformed >1 min
 - [Don't ask permission for local work](feedback_stop_asking_permission.md) — Never ask "shall I proceed?" for local ops; just move to the next task
 - [Exhaust hypothesis variants before discarding](feedback_exhaust_hypothesis_variants.md) — One failed symmetry/size/etc. variant ≠ whole hypothesis family fails; test all sub-variants first
+- [The silent code trap](feedback_silent_code_trap.md) — After data loads, write the 7-item verbal structure first; never call a tool before it's written

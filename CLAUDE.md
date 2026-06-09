@@ -1,5 +1,5 @@
 # CLAUDE.md
-*Last updated: 2026-06-09*
+*Last updated: 2026-06-10*
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -54,6 +54,22 @@ When working an evaluation task:
 
 **THE CODE GATE — read this first.**
 You may write code to load and print task data. That is all. Every other piece of code — any code that tests a hypothesis, computes a statistic, measures a distance, or implements any part of a solve() function — is blocked until the verbal 4-step is complete and written in full in your response. There are no exceptions. Pattern-matching quickly and then reaching for code to "confirm" is not following the process — it is skipping it.
+
+**THE SILENT CODE TRAP — the failure mode to avoid.**
+After data loads, the temptation is to immediately call another tool to "quickly check" something. This is the silent code trap. It produces no visible output, consumes time invisibly, and bypasses the user entirely. The symptom: data prints, then nothing visible for minutes. The cure: after data loads, your next action is always to write text — never to call a tool.
+
+**THE MANDATORY RESPONSE STRUCTURE.**
+After the data-loading tool call returns, your very next action must be to write the following seven items as visible text in your response, in this order. No tool call may be made until all seven are present:
+
+1. **Output dimensions** — one sentence comparing input and output sizes across all pairs.
+2. **Lens 1 result** — Fixed vs. moving: what stays, what changes?
+3. **Lens 2 result** — How many parts?
+4. **Lens 3 result** — Nature of the change?
+5. **Lens 4 result** — What drives the change?
+6. **Lens 5–7 results** — Spatial relationship, more/less structure?
+7. **Steps 1–4 + held-out prediction** — all five items from the verbal protocol below.
+
+If you find yourself about to call a tool and these seven items are not yet written above it in your response, stop and write them first. This is not optional. The process is not a hurdle — it is the reason the correct answer arrives on the first code attempt instead of the tenth.
 
 For each task:
 
